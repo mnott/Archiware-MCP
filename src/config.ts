@@ -1,0 +1,148 @@
+/**
+ * Configuration for archiware-mcp.
+ *
+ * Read from ~/.config/archiware-mcp/config.json (or the file named by
+ * ARCHIWARE_CONFIG), overridable by the environment variables ARCHIWARE_MODE,
+ * ARCHIWARE_SSH_HOST, ARCHIWARE_CONTAINER, ARCHIWARE_CONTAINER_IP,
+ * ARCHIWARE_REST_URL, ARCHIWARE_REST_USER, ARCHIWARE_REST_PASSWORD_FILE, ARCHIWARE_BACKUP_DIR.
+ */
+
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/** One tape drive: mtx element number, generation, host nst device, P5 device name. */
+export interface DriveConfig {
+  /** Data Transfer Element number in the changer (mtx element). */
+  element: number;
+  /** Tape generation: "L6" = LTO-6, "L9" = LTO-9. Barcode suffix decides it. */
+  gen: string;
+  /** Host tape device, e.g. /dev/nst1 (mt / dd talk to this). */
+  nst: string;
+  /** P5 device name, e.g. sg7. */
+  p5: string;
+}
+
+/** Where P5 runs: docker (container on an ssh host), ssh (native on an ssh host), local (this machine). */
+export type Mode = "docker" | "ssh" | "local";
+export const MODES: Mode[] = ["docker", "ssh", "local"];
+
+export interface ArchiwareConfig {
+  /** Where Archiware P5 runs. */
+  mode: Mode;
+  /** Host reachable via plain `ssh <sshHost>` (docker and ssh mode; unused in local mode). */
+  sshHost: string;
+  /** Docker container name running P5 (docker mode). */
+  container: string;
+  /** P5 install directory of a native install (ssh and local mode). */
+  p5Home: string;
+  /** Path to nsdchat (inside the container in docker mode). Default <p5Home>/bin/nsdchat. */
+  nsdchat: string;
+  /** Medium changer device on the P5 host, for `sudo -n mtx -f <changer> status`. */
+  changer: string;
+  /** lexxsrv log on the P5 host (holds the job report blocks). Native modes default to <p5Home>/log/lexxsrv.log; docker mode: host path of the mounted log, "" = not available. */
+  logPath: string;
+  /** Command timeout in milliseconds. */
+  timeoutMs: number;
+  /** Tape drives, for host-side tape operations (mtx/mt). */
+  drives: DriveConfig[];
+  /** Slot holding the cleaning tape (barcode CLN*); 0 = none. */
+  cleaningSlot: number;
+  /** P5 container IP, used for the REST URL (docker mode; reachable from the docker host). */
+  containerIp: string;
+  /** REST base URL (no trailing slash). Default https://<containerIp>:8443 (docker) or https://localhost:8443 (ssh, local); curl runs on the P5 host. */
+  restUrl: string;
+  /** REST basic-auth user. */
+  restUser: string;
+  /** File (local, mode 600) holding the REST password; read at call time only. */
+  restPasswordFile: string;
+  /** REST call timeout in milliseconds. */
+  restTimeoutMs: number;
+  /** Host paths whose free space `health` checks (df -P). */
+  healthPaths: string[];
+  /** Host dir (docker mode) under which container_backup creates archiware-update-<YYYYMMDD>. */
+  backupDir: string;
+  /** Host dir (docker mode) of the docker compose project (cold copy source). */
+  composeDir: string;
+}
+
+/**
+ * Defaults carry no site-specific values: host, container, container IP,
+ * compose dir and backup dir are required keys that `archiware setup` fills in.
+ */
+export const DEFAULT_CONFIG: ArchiwareConfig = {
+  mode: "docker",
+  sshHost: "",
+  container: "",
+  p5Home: "/usr/local/aw",
+  nsdchat: "",
+  changer: "",
+  logPath: "",
+  timeoutMs: 60_000,
+  drives: [],
+  cleaningSlot: 0,
+  containerIp: "",
+  restUrl: "",
+  restUser: "admin",
+  restPasswordFile: join(homedir(), ".config", "archiware-mcp", "rest.password"),
+  restTimeoutMs: 20_000,
+  healthPaths: [],
+  backupDir: "",
+  composeDir: "",
+};
+
+export function configPath(): string {
+  return process.env.ARCHIWARE_CONFIG || join(homedir(), ".config", "archiware-mcp", "config.json");
+}
+
+/** Read the raw config file (empty object when missing or unreadable). */
+export function readConfigFile(path = configPath()): Partial<ArchiwareConfig> {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? join(homedir(), p.slice(1)) : p);
+const trimSlash = (p: string) => p.replace(/\/+$/, "") || (p ? "/" : "");
+
+export function loadConfig(path = configPath()): ArchiwareConfig {
+  return buildConfig(readConfigFile(path));
+}
+
+/** Resolve a raw config object (file contents) plus environment overrides into a full config. */
+export function buildConfig(file: Partial<ArchiwareConfig>): ArchiwareConfig {
+  const mode = (process.env.ARCHIWARE_MODE ?? file.mode ?? DEFAULT_CONFIG.mode) as Mode;
+  const p5Home = trimSlash(file.p5Home ?? DEFAULT_CONFIG.p5Home);
+  const containerIp = process.env.ARCHIWARE_CONTAINER_IP ?? file.containerIp ?? DEFAULT_CONFIG.containerIp;
+  const defaultRest = mode === "docker" ? (containerIp ? `https://${containerIp}:8443` : "") : "https://localhost:8443";
+  return {
+    mode,
+    sshHost: process.env.ARCHIWARE_SSH_HOST ?? file.sshHost ?? DEFAULT_CONFIG.sshHost,
+    container: process.env.ARCHIWARE_CONTAINER ?? file.container ?? DEFAULT_CONFIG.container,
+    p5Home,
+    nsdchat: file.nsdchat ?? `${p5Home}/bin/nsdchat`,
+    changer: file.changer ?? DEFAULT_CONFIG.changer,
+    logPath: file.logPath ?? (mode === "docker" ? "" : `${p5Home}/log/lexxsrv.log`),
+    timeoutMs: file.timeoutMs ?? DEFAULT_CONFIG.timeoutMs,
+    drives: Array.isArray(file.drives) ? file.drives : DEFAULT_CONFIG.drives,
+    cleaningSlot: file.cleaningSlot ?? DEFAULT_CONFIG.cleaningSlot,
+    containerIp,
+    restUrl: (process.env.ARCHIWARE_REST_URL ?? file.restUrl ?? defaultRest).replace(/\/+$/, ""),
+    restUser: process.env.ARCHIWARE_REST_USER ?? file.restUser ?? DEFAULT_CONFIG.restUser,
+    restPasswordFile: expandHome(process.env.ARCHIWARE_REST_PASSWORD_FILE ?? file.restPasswordFile ?? DEFAULT_CONFIG.restPasswordFile),
+    restTimeoutMs: file.restTimeoutMs ?? DEFAULT_CONFIG.restTimeoutMs,
+    healthPaths: Array.isArray(file.healthPaths) ? file.healthPaths : DEFAULT_CONFIG.healthPaths,
+    backupDir: trimSlash(process.env.ARCHIWARE_BACKUP_DIR ?? file.backupDir ?? DEFAULT_CONFIG.backupDir),
+    composeDir: trimSlash(file.composeDir ?? DEFAULT_CONFIG.composeDir),
+  };
+}
+
+/** Keys the chosen mode cannot work without but that are not set. */
+export function missingKeys(cfg: ArchiwareConfig): string[] {
+  const need: (keyof ArchiwareConfig)[] = ["restUrl", "restUser", "restPasswordFile"];
+  if (cfg.mode === "docker") need.push("sshHost", "container", "containerIp", "composeDir", "backupDir");
+  if (cfg.mode === "ssh") need.push("sshHost", "p5Home");
+  return need.filter((k) => !cfg[k]);
+}

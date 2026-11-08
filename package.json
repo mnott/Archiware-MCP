@@ -1,0 +1,40 @@
+{
+  "name": "archiware-mcp",
+  "version": "0.2.0",
+  "description": "MCP server + CLI for Archiware P5 backup servers (docker, ssh or local install). Unofficial.",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "archiware": "dist/cli.js",
+    "archiware-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    ".claude-plugin",
+    "README.md",
+    "REST.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/Archiware-MCP.git"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "archiware",
+  "displayName": "Archiware MCP",
+  "description": "MCP server and CLI for Archiware P5 backup servers, with an install skill. Unofficial.",
+  "version": "0.2.0",
+  "license": "MIT",
+  "homepage": "https://github.com/OWNER/Archiware-MCP",
+  "repository": "https://github.com/OWNER/Archiware-MCP",
+  "keywords": ["archiware", "p5", "backup", "tape", "mcp"],
+  "skills": ["./skills/"]
+}
