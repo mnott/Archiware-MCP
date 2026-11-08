@@ -12,21 +12,21 @@ Prerequisites: [Claude Code](https://claude.com/claude-code) and Node.js 20 or n
 
 The easy way: tell Claude Code
 
-> Clone https://github.com/<owner>/Archiware-MCP and set it up for me
+> Clone https://github.com/mnott/Archiware-MCP and set it up for me
 
 Claude reads this repository, finds the setup skill (`skills/setup`) and walks you through it: it asks where Archiware runs and for the connection details one question at a time, runs `archiware setup`, then `archiware doctor`, and reports a pass/fail list. It never asks you to paste the REST password into chat: you type it at a hidden prompt.
 
 Or by hand. There is no npm registry; the install is the GitHub Release tarball:
 
 ```
-npm i -g https://github.com/<owner>/Archiware-MCP/releases/latest/download/archiware-mcp.tgz
+npm i -g https://github.com/mnott/Archiware-MCP/releases/latest/download/archiware-mcp.tgz
 archiware setup
 archiware doctor
 ```
 
 Update by re-running the install line, or `archiware update` (`archiware update --check` only reports). From a clone instead: `npm install && npm run build && npm link`.
 
-The same repository is also a Claude Code plugin (skill only): `claude plugin marketplace add <owner>/Archiware-MCP`, `claude plugin install archiware@archiware`, then say "set up Archiware".
+The same repository is also a Claude Code plugin (skill only): `claude plugin marketplace add mnott/Archiware-MCP`, `claude plugin install archiware@archiware`, then say "set up Archiware".
 
 ## Modes: where Archiware runs
 

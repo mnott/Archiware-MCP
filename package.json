@@ -20,7 +20,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/Archiware-MCP.git"
+    "url": "git+https://github.com/mnott/Archiware-MCP.git"
   },
   "scripts": {
     "build": "tsc",

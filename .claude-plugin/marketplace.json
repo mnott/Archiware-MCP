@@ -1,7 +1,7 @@
 {
   "name": "archiware",
   "owner": {
-    "name": "OWNER"
+    "name": "mnott"
   },
   "metadata": {
     "description": "Archiware MCP: manage Archiware P5 from Claude Code (unofficial)"
@@ -11,7 +11,7 @@
       "name": "archiware",
       "source": "./",
       "description": "MCP server and CLI for Archiware P5 backup servers, with an install skill",
-      "homepage": "https://github.com/OWNER/Archiware-MCP"
+      "homepage": "https://github.com/mnott/Archiware-MCP"
     }
   ]
 }

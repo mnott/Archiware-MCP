@@ -29,10 +29,10 @@ Verify: all commands print a version.
 
 Check: `archiware version`.
 
-Whether the user said "Clone https://github.com/<owner>/Archiware-MCP and set it up for me" or started from scratch, install the released tarball (the clone is only where these instructions came from):
+Whether the user said "Clone https://github.com/mnott/Archiware-MCP and set it up for me" or started from scratch, install the released tarball (the clone is only where these instructions came from):
 
 ```
-npm i -g https://github.com/<owner>/Archiware-MCP/releases/latest/download/archiware-mcp.tgz
+npm i -g https://github.com/mnott/Archiware-MCP/releases/latest/download/archiware-mcp.tgz
 ```
 
 Fallback when no release exists yet or the user wants the clone itself (for development): inside the clone run
