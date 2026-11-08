@@ -1,6 +1,6 @@
 {
   "name": "archiware-mcp",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "MCP server + CLI for Archiware P5 backup servers (docker, ssh or local install). Unofficial.",
   "private": true,
   "type": "module",
