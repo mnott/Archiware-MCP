@@ -78,6 +78,10 @@ export interface ArchiwareConfig {
   operatorMail: string;
   /** Days without a sent P5 mail (while jobs ran) before doctor/health warn. Default 3. */
   mailSilenceDays: number;
+  /** Optional override of the p5_dr_kit destination (default <backupDir>/p5-dr-kit). */
+  drKitDir: string;
+  /** How many verified p5_config_backup copies to keep under <backupDir>/p5-config. Default 7. */
+  p5ConfigBackupKeep: number;
   /** Months back governance_report looks for runs when judging plans. Default 3. */
   governanceMonths: number;
   /** Days a plan may stay disabled before governance_report flags it. Default 60. */
@@ -134,6 +138,8 @@ export const DEFAULT_CONFIG: ArchiwareConfig = {
   p5ConfigDir: "",
   operatorMail: "",
   mailSilenceDays: 3,
+  drKitDir: "",
+  p5ConfigBackupKeep: 7,
   governanceMonths: 3,
   disabledDays: 60,
   catalogMysqlContainer: "mysql",
@@ -200,6 +206,8 @@ export function buildConfig(file: Partial<ArchiwareConfig>): ArchiwareConfig {
     p5ConfigDir: trimSlash(file.p5ConfigDir ?? DEFAULT_CONFIG.p5ConfigDir),
     operatorMail: file.operatorMail ?? DEFAULT_CONFIG.operatorMail,
     mailSilenceDays: file.mailSilenceDays ?? DEFAULT_CONFIG.mailSilenceDays,
+    drKitDir: trimSlash(file.drKitDir ?? DEFAULT_CONFIG.drKitDir),
+    p5ConfigBackupKeep: file.p5ConfigBackupKeep ?? DEFAULT_CONFIG.p5ConfigBackupKeep,
     governanceMonths: file.governanceMonths ?? DEFAULT_CONFIG.governanceMonths,
     disabledDays: file.disabledDays ?? DEFAULT_CONFIG.disabledDays,
     catalogMysqlContainer: file.catalogMysqlContainer ?? DEFAULT_CONFIG.catalogMysqlContainer,

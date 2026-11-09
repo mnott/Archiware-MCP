@@ -326,5 +326,21 @@ export async function health(cfg: ArchiwareConfig): Promise<{ overall: Level; ch
       return { level: "ok", reason: `${mc.server}:${mc.port}, last mail sent ${ev?.lastSent ?? "never"}` };
     }),
   );
+  if (cfg.backupDir) {
+    const { listCopies, staleWarning } = await import("./configbackup.js");
+    const copies = await listCopies(cfg).catch(() => []);
+    if (copies.length) {
+      const w = staleWarning(copies, Date.now());
+      checks.push({ name: "p5 config backup", level: w ? "warn" : "ok", reason: w ?? `${copies.filter((c) => c.state === "verified").length} verified copies` });
+    }
+  }
+  if (cfg.backupDir && cfg.mode === "docker") {
+    const { drKitCopies, drStaleWarning } = await import("./drkit.js");
+    const copies = await drKitCopies(cfg).catch(() => []);
+    if (copies.length) {
+      const w = drStaleWarning(copies, Date.now());
+      checks.push({ name: "p5 dr kit", level: w ? "warn" : "ok", reason: w ?? `${copies.filter((c) => c.state === "verified").length} verified kits` });
+    }
+  }
   return { overall: worst(checks), checks };
 }

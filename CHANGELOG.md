@@ -4,6 +4,11 @@
 
 **Important: single-path restores in 0.2.0 were wrong and are fixed.** In 0.2.0, `restore --at` / `restore --job` restored one path by selecting the whole backup volume (`RestoreSelection addfromvolume`), so a request for one file restored everything on the tape. This no longer happens. P5's CLI and REST cannot select one path of a backup version, so `restore --at` (and `restore_version` for a version on a tape in the library) now prints a full plan and the exact P5 GUI steps and starts no P5 job. Whole volumes are restored only by the explicit `restore_volume`. See `docs/restore.md`.
 
+### Backup
+- New `p5_config_backup [--status] [--yes]` (MCP `p5_config_backup`): consistent copy of P5's configuration and all SQLite databases (found by file header, copied with `sqlite3 .backup`, `integrity_check` on each copy) plus a tar of the rest into `<backupDir>/p5-config/<stamp>/` with manifest and SHA256SUMS; flock, nice, ionice; P5 keeps running. Keeps the newest `p5ConfigBackupKeep` (default 7) verified copies, never touches `archiware-update-*`. `health`/`doctor` warn when the newest verified copy is older than 36 h. Guide: `docs/guides/p5-config-backup.md`.
+
+- New `p5_dr_kit [--status] [--yes]` (MCP `p5_dr_kit`, docker mode only): disaster-recovery kit for the P5 server in `<backupDir>/p5-dr-kit` (config `drKitDir`): small config databases and key files, compose project, running image (only when its id changed), P5 program tree (only when the version changed), `kit-small.tar.gz` for a password manager or private repo; 7 generations, SHA256SUMS, VERIFIED; `health` warns when the newest verified kit is older than 36 h. Guide: `docs/guides/disaster-recovery.md`.
+
 ### Safety
 - `tape_erase` now checks P5's volume list before loading: a tape whose barcode P5 still knows as a volume (or whose barcode is unknown) is refused with slot, barcode, volume id and pool, unless the new `--erase-known` (MCP `eraseKnown`) is given. The preview lists the targets that would be refused.
 

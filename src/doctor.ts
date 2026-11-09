@@ -25,6 +25,8 @@ const line = (name: string, level: Level, reason: string, fix?: string): DoctorL
 
 /** Fix hints for the checks that `health` reports. */
 const HEALTH_FIX: Record<string, string> = {
+  p5: "run `archiware p5_config_backup --yes` (schedule it daily, see docs/guides/p5-config-backup.md)",
+  "p5 dr kit": "run `archiware p5_dr_kit --yes` (schedule it daily, see docs/guides/disaster-recovery.md)",
   container: "start it (docker start <container>) or fix `container` in the config",
   p5host: "check `p5Home` in the config: nsdchat must exist at <p5Home>/bin/nsdchat",
   rest: "check restUrl/containerIp, restUser and the password file; is the P5 web server up on port 8443?",

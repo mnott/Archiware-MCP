@@ -17,6 +17,8 @@ import * as ops from "./operations.js";
 import * as tape from "./tapeops.js";
 import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
+import { p5ConfigBackup } from "./configbackup.js";
+import { p5DrKit } from "./drkit.js";
 import * as tops from "./taskops.js";
 import { restRequest, restResources, type RestMethod } from "./rest.js";
 import * as lib from "./libops.js";
@@ -116,6 +118,8 @@ Commands:
                          REST passthrough under /rest/v1 (non-GET needs --yes)
   container_status       state, image, version, newest backup of the P5 container
   container_backup [--restart] [--force]            cold backup, STOPS the container (needs --yes)
+  p5_dr_kit [--status]                              disaster-recovery kit for the P5 server (config-small, compose, image, program tree) into <backupDir>/p5-dr-kit (needs --yes)
+  p5_config_backup [--status]                       consistent copy of P5 config + SQLite indexes into <backupDir>/p5-config (needs --yes; P5 keeps running)
   container_stop [--force]                          docker stop -t 120 (needs --yes)
   container_start                                   docker start, wait for srvinfo (needs --yes)
   container_update <file.deb> [--skip-backup-check] [--force]   install a .deb in the container (needs --yes)
@@ -801,6 +805,12 @@ async function main() {
       break;
     case "container_backup":
       printResult("container_backup", await cops.containerBackup(cfg, yes, { force: flags.has("force"), restart: flags.has("restart") }, cliProgress), json);
+      break;
+    case "p5_dr_kit":
+      printResult("p5_dr_kit", await p5DrKit(cfg, { confirm: yes, status: flags.has("status") }), json);
+      break;
+    case "p5_config_backup":
+      printResult("p5_config_backup", await p5ConfigBackup(cfg, { confirm: yes, status: flags.has("status") }), json);
       break;
     case "container_stop":
       printResult("container_stop", await cops.containerStop(cfg, yes, flags.has("force"), cliProgress), json);

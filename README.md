@@ -55,6 +55,8 @@ Task-oriented walkthroughs with examples (CLI and MCP form), each: why, steps, e
 | Set up the backup index copy and search | `archiware index_sync --detach` | [index-search-setup](docs/guides/index-search-setup.md) |
 | Deploy the web viewer behind a reverse proxy | `archiware viewer_deploy --network N ...` | [web-viewer-setup](docs/guides/web-viewer-setup.md) |
 | Back up and update the P5 container | `archiware container_status` | [p5-container](docs/guides/p5-container.md) |
+| Routine consistent copy of P5 config and indexes | `archiware p5_config_backup` | [p5-config-backup](docs/guides/p5-config-backup.md) |
+| Rebuild a lost P5 server (kit of small pieces) | `archiware p5_dr_kit` | [disaster-recovery](docs/guides/disaster-recovery.md) |
 | Clean, label, inventory, read, erase tapes | `archiware slots` | [tape-maintenance](docs/guides/tape-maintenance.md) |
 
 ## Modes: where Archiware runs

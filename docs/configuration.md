@@ -82,6 +82,8 @@ Required per mode (`doctor` reports what is missing): all modes need `restUrl`, 
 | `mailSlots` | `[]` | Import/export (mail slot) element ids; empty = taken from mtx |
 | `logPath` | docker: empty; other modes: `<p5Home>/log/lexxsrv.log` | lexxsrv log on the P5 host (job report blocks, health). Docker mode: host path of the mounted log; empty = not available |
 | `healthPaths` | `[]` | Host paths whose free space `health` checks (`df -P`) |
+| `drKitDir` | `<backupDir>/p5-dr-kit` | Destination of `p5_dr_kit` (docker mode) |
+| `p5ConfigBackupKeep` | 7 | Verified `p5_config_backup` copies kept under `<backupDir>/p5-config` |
 | `p5ConfigDir` | derived | Host path of P5's config folder (holds `customerconfig/` and `index/backup/`). Derived from `logPath` (`<logdir>/../config`) or `<p5Home>/config`. Read-only use |
 
 ## Core keys: governance and mail

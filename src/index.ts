@@ -17,6 +17,8 @@ import * as lib from "./libops.js";
 import * as gov from "./govops.js";
 import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
+import { p5ConfigBackup } from "./configbackup.js";
+import { p5DrKit } from "./drkit.js";
 import * as tops from "./taskops.js";
 import * as cat from "./catalog.js";
 import * as idx from "./indexsync.js";
@@ -949,6 +951,38 @@ server.registerTool(
   async ({ confirm, force, restart }) => {
     try {
       return text(await cops.containerBackup(cfg, Boolean(confirm), { force, restart }, progressLog));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "p5_dr_kit",
+  {
+    description:
+      "Disaster-recovery kit for the P5 server itself (docker mode only): consistent copies of the small config databases (sqlite3 .backup, integrity_check) and key files, the compose project, the running image (docker save, only when its id changed) and the P5 program tree (only when the P5 version changed), plus kit-small.tar.gz (config-small + compose + manifest) for a password manager or private repo. Writes <backupDir>/p5-dr-kit/<stamp>/ (7 generations, SHA256SUMS, VERIFIED). status:true lists generations. Requires confirm:true; without it the plan with sizes is returned.",
+    inputSchema: { confirm: confirmField, status: z.boolean().optional().describe("List existing generations instead") },
+  },
+  async ({ confirm, status }) => {
+    try {
+      return text(await p5DrKit(cfg, { confirm: Boolean(confirm), status }));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "p5_config_backup",
+  {
+    description:
+      "Consistent copy of P5's configuration and SQLite index databases (online sqlite3 .backup, integrity_check on each copy, tar of the rest, SHA256SUMS, manifest) into <backupDir>/p5-config/<YYYYMMDD-HHMMSS>/, restorable without P5. P5 keeps running. Keeps the newest p5ConfigBackupKeep verified copies. status:true lists copies. Requires confirm:true; without it the plan (sources, destination, size, free space) is returned.",
+    inputSchema: { confirm: confirmField, status: z.boolean().optional().describe("List existing copies instead") },
+  },
+  async ({ confirm, status }) => {
+    try {
+      return text(await p5ConfigBackup(cfg, { confirm: Boolean(confirm), status }));
     } catch (e) {
       return err(e);
     }
