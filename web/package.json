@@ -1,0 +1,19 @@
+{
+  "name": "catalog-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only web page for the archiware-mcp tar catalogue (companion to the P5 web UI)",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  },
+  "license": "MIT"
+}

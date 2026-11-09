@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `pack --detach` runs a whole pack as one self-contained runner on the P5 host (survives a disconnect, resumable per tar); `pack_status` (progress, rate, ETA, log tail) and `pack_stop` (after the current tar). New `web/`: read-only catalogue web page (search, sets, browse, tape side, restore command, link to the P5 web UI).
 - New file catalogue for D2D2T packs (MySQL `archive_catalog` on the P5 host): `catalog_init`, `pack` (plan, then resumable tar writing with sha256, listing and per-tar transactional rows), `catalog_sets`, `catalog_search` (with tape location per tar), `catalog_restore` (from disk or via tape), `catalog_drop`; config keys `catalogMysqlContainer`, `catalogDbCnf`, `packRoot`, `packRootP5`, `packMBps`.
 
 - Fixed `restore_options` / `restore`: versions now come from P5's per-client backup index (read-only, via sqlite3 on the host) instead of job roots, so a path's real versions with every volume copy are listed; `restore --at "<start>"` replaces `--job`. P5's nsdchat/REST cannot put a single backup entry into a restore selection (documented in the README).

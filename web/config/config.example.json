@@ -1,0 +1,15 @@
+{
+  "listen": 8080,
+  "p5BaseUrl": "https://p5.example.org:8000",
+  "p5RestUrl": "https://192.0.2.10:8443",
+  "p5Client": "localhost",
+  "indexDir": "/p5index",
+  "mysqlHost": "192.0.2.20",
+  "mysqlPort": 3306,
+  "mysqlDatabase": "archive_catalog",
+  "packRoot": "/srv/archive/pack",
+  "packRootMount": "/packroot",
+  "packRootP5": "/mnt/archive/pack",
+  "mailSlots": [],
+  "cliName": "archiware"
+}

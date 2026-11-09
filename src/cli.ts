@@ -91,7 +91,9 @@ Commands:
   library_status <session> / library_abort <session>
   library_reconcile [--yes]                       compare P5 volume locations with mtx, cleaningSlot, plan events (--yes fixes cleaningSlot in the config)
   catalog_init           create the file catalogue schema (MySQL archive_catalog) idempotently
-  pack <source dir> --set NAME [--max 50G] [--into <pack root>] [--replan]   cut a folder into tars and catalogue every file (plan without --yes; --yes writes, resumable)
+  pack <source dir> --set NAME [--max 50G] [--into <pack root>] [--replan] [--detach]   cut a folder into tars and catalogue every file (plan without --yes; --yes writes, resumable; --detach runs it on the host)
+  pack_status --set NAME   detached pack: tars done/total, bytes, current tar, rate, ETA, log tail
+  pack_stop --set NAME     stop a detached pack after the current tar (needs --yes)
   catalog_sets           sets with tars, files, bytes, status
   catalog_search <pattern> [--set NAME] [--limit N]   find files (glob or substring) with tar, on-disk and tape location
   catalog_restore <path> --set NAME --to <dir>   extract one file from its tar (from disk, else via tape restore) (needs --yes)
@@ -509,9 +511,17 @@ async function main() {
       break;
     case "pack": {
       if (!positional[1] || !values.get("set")) throw new Error("usage: archiware pack <source dir> --set NAME [--max 50G] [--into <pack root>] [--yes]");
-      printResult("pack", await cat.pack(cfg, positional[1], { set: values.get("set")!, max: values.get("max"), into: values.get("into"), confirm: yes, replan: flags.has("replan") }, cliProgress), json);
+      printResult("pack", await cat.pack(cfg, positional[1], { set: values.get("set")!, max: values.get("max"), into: values.get("into"), confirm: yes, replan: flags.has("replan"), detach: flags.has("detach") }, cliProgress), json);
       break;
     }
+    case "pack_status":
+      if (!values.get("set")) throw new Error("usage: archiware pack_status --set NAME");
+      printResult("pack_status", await cat.packStatus(cfg, values.get("set")!), json);
+      break;
+    case "pack_stop":
+      if (!values.get("set")) throw new Error("usage: archiware pack_stop --set NAME [--yes]");
+      printResult("pack_stop", await cat.packStop(cfg, values.get("set")!, yes), json);
+      break;
     case "catalog_sets":
       printResult("catalog_sets", await cat.catalogSets(cfg), json);
       break;

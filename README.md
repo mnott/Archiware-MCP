@@ -123,7 +123,7 @@ archiware restore <volume> <path> <target-dir> --yes     restore to an ALTERNATE
 archiware restore --at "<start>" <path> <target-dir> --yes  restore the version chosen from restore_options
 archiware governance_report | governance_apply <item> | schedule_check [--days N] | ensure_done [--since T] [--rerun] [--mail] | notify_status | notify_set | notify_test
 archiware library_layout | library_arrange | tape_export <tape> | tape_import [mail slot] | restore_options <path> | offsite_status [--path p]
-archiware catalog_init | pack <source> --set NAME [--max 50G] [--into <root>] [--yes] | catalog_sets | catalog_search <pattern> [--set N] [--limit N] | catalog_restore <path> --set N --to <dir> --yes | catalog_drop --set N --yes
+archiware catalog_init | pack <source> --set NAME [--max 50G] [--into <root>] [--detach] [--yes] | pack_status --set N | pack_stop --set N --yes | catalog_sets | catalog_search <pattern> [--set N] [--limit N] | catalog_restore <path> --set N --to <dir> --yes | catalog_drop --set N --yes
 archiware library_plan arrange|export <tape>|import [slot] [--simulate] | library_step <session> | library_status <session> | library_abort <session> | library_reconcile
 archiware label_tapes <jukebox> <pool> <slot...> --yes   DESTRUCTIVE: label EMPTY tapes
 archiware inventory <jukebox> [--barcode] --yes          schedule inventory job
@@ -226,6 +226,7 @@ Data that is packed into tar files before it goes to tape needs a "which file is
 
 - `catalog_init` creates the schema idempotently (no FULLTEXT index: substring search is a LIKE on the `(set_id, path)` and `basename` indexes).
 - `pack <source dir> --set NAME [--max 50G] [--into <root>]`: without `--yes` only the plan: one low-priority `find` walk, cut along folder boundaries (a folder bigger than `--max` is split one level deeper, a single file bigger than `--max` gets its own tar), tar names, sizes, file counts and a time estimate. With `--yes`: per tar `tar --sort=inode` to `.part`, sha256, a plain-text `<tar>.list` (path, size, mtime) next to it so the catalogue can be rebuilt from disk or tape alone, then the tar row and all its member rows in ONE transaction (batches of 2000 rows), then the `.done` marker. Rerunning the same command resumes (the plan is stored in `<tar dir>/.plan.json`; `--replan` discards it). It never takes the nsdchat lock. File names containing a newline cannot be packed (reported in the plan); non-UTF-8 bytes in names are dropped from the catalogue copy of the name.
+- `pack ... --detach --yes`: instead of driving every tar from this client, one self-contained shell runner for the whole plan (the same tar / listing / sha256 / catalogue insert steps, inserts through `docker exec -i <mysql> mysql --defaults-extra-file=/dev/stdin < <cnf>`) is uploaded to `<tar dir>/.runner.sh` and started with `setsid nohup`; the client may disconnect at any time. Resumable per tar (`.done` markers), log in `<tar dir>/.runner.log`, set status `packing` / `packed` / `stopped`. `pack_status --set N`: running or not, tars done/total, bytes, current tar, rate, ETA, last log lines. `pack_stop --set N --yes`: stop marker, the runner stops after the current tar; rerun the same `pack --detach --yes` to resume.
 - `catalog_sets`: sets with tar count, file count, bytes, status.
 - `catalog_search <pattern> [--set N] [--limit N]`: glob (`*` `?`) or substring; per hit set, path, size, mtime, tar, whether the tar is still on disk, and the tape versions of that tar (date, plan, volume label, barcode, location) from `restore_options` on the tar's path.
 - `catalog_restore <path> --set N --to <dir> --yes`: extracts one member from the tar on disk; if the tar is gone it is restored from tape through the normal restore path into a scratch dir under `<packRoot>/.restore`, the member extracted, the scratch tar deleted. Refuses with the fetch list when no needed tape is in the library. P5 restores whole backup volumes, so the tape path inherits the `restore` limit (refused when the volume holds data outside the tar).
@@ -242,3 +243,7 @@ P5 8 serves a REST API on port 8443 (self-signed certificate, not verified: the 
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+### Web page
+
+`web/` holds a small read-only web page (search, sets, folder browse, tape side per hit, restore command shown but never run) as its own compose project; see `web/README.md`.

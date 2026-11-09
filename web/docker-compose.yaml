@@ -1,0 +1,25 @@
+services:
+  catalog:
+    build: .
+    image: local/catalog-web:latest
+    container_name: catalog
+    hostname: catalog
+    restart: unless-stopped
+    read_only: true
+    environment:
+      - TZ=Europe/Amsterdam
+    volumes:
+      # everything that must survive a rebuild lives on the host; nothing is written inside the container
+      - ./secrets:/secrets:ro
+      - ./config:/config:ro
+      # P5's backup index (read-only): which tape holds which tar
+      - /path/to/p5/config/index/backup:/p5index:ro
+      # the pack root (read-only): "tar still on disk" check
+      - /path/to/pack-root:/packroot:ro
+    networks:
+      dockernet:
+        ipv4_address: 192.0.2.30
+
+networks:
+  dockernet:
+    external: true
