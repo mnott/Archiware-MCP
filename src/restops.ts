@@ -129,6 +129,21 @@ export function cancelPlan(cfg: ArchiwareConfig, id: string): string[] {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * State of a job after a cancel. REST answers 404 for a job that is no longer active
+ * (a canceled job disappears from /general/jobs), so then the authoritative state is
+ * nsdchat `Job <id> status` ("cancelled") and `completion` ("exception").
+ */
+async function stateAfter(cfg: ArchiwareConfig, id: string): Promise<{ status: string; completion: string | null }> {
+  try {
+    const r = await restJobRow(cfg, id);
+    return { status: String(r.status), completion: r.completion === undefined ? null : String(r.completion) };
+  } catch {
+    const [st, co] = await Promise.all([nsdchat(cfg, ["Job", id, "status"]).catch(() => "unknown"), nsdchat(cfg, ["Job", id, "completion"]).catch(() => "")]);
+    return { status: st || "unknown", completion: co || null };
+  }
+}
+
 export async function jobCancel(cfg: ArchiwareConfig, id: string, confirm: boolean) {
   assertJobId(id);
   if (!confirm) {
@@ -146,9 +161,10 @@ export async function jobCancel(cfg: ArchiwareConfig, id: string, confirm: boole
     restError = e instanceof Error ? e.message : String(e);
   }
   let after = before.status as string;
+  let completion: string | null = null;
   for (let i = 0; i < 3; i++) {
-    await sleep(3000);
-    after = String((await restJobRow(cfg, id).catch(() => ({ status: "unknown" }))).status);
+    await sleep(i === 0 ? 1000 : 3000);
+    ({ status: after, completion } = await stateAfter(cfg, id));
     if (!ACTIVE_STATES.has(after)) break;
   }
   if (ACTIVE_STATES.has(after) || after === "unknown") {
@@ -158,9 +174,9 @@ export async function jobCancel(cfg: ArchiwareConfig, id: string, confirm: boole
       restError = `${restError ?? ""}; nsdchat: ${(e as Error).message}`;
     });
     await sleep(3000);
-    after = String((await restJobRow(cfg, id).catch(() => ({ status: "unknown" }))).status);
+    ({ status: after, completion } = await stateAfter(cfg, id));
   }
-  return { confirmationRequired: false as const, job: id, before: before.status, after, via, canceled: !ACTIVE_STATES.has(after), restError };
+  return { confirmationRequired: false as const, job: id, before: before.status, after, completion, via, canceled: !ACTIVE_STATES.has(after) && after !== "unknown", restError };
 }
 
 // ---------------------------------------------------------------------------

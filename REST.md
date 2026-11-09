@@ -34,17 +34,28 @@ Query parameters such as `?status=running` or `?offset=1` are ignored by the ser
 
 Seen live: `scheduled` (future runs; `completion` is then a placeholder like `failure`). Active states treated by archiware-mcp: `running`, `waiting`, `pending`, `scheduled`. No running or waiting job existed during the discovery, so those state names are **unverified** against REST output; nsdchat names are running / pending.
 
-## Cancelling a running or waiting job
+## Job listing and history
 
-Not testable read-only (mutating methods were not sent). `job_cancel <id>` therefore:
+- REST `general/jobs` lists only current (active/scheduled) jobs; a finished job answers HTTP 404 on `general/jobs/<id>`. nsdchat `Job names` lists only scheduled jobs, `Job running` / `Job pending` the active ones.
+- History still exists in the job database: `Job <id> status|describe|completion|resourcename|totalkbytes|totalfiles|protocol` answers for finished ids (`completed`, `terminated`, `cancelled`), exit 100 for ids that do not exist. Ids are contiguous, so `job-history` walks them downward from the newest known id.
+- A finished job's `describe` is the plan name; a scheduled job's is `<plan> - '<client>'`. `runat` is 0 for finished jobs; the start time is the protocol line `Client time: DD-Mon-YYYY HH:MM:SS` (server-local). The first protocol line says `Full save of: <path> to pool <pool>.`.
+- nsdchat -c evaluates its words as a Tcl script, so one call can loop over many ids (`foreach i {...} {catch {Job $i status}}`): 100 ids per call instead of one ssh round trip per few ids (about 6 s for 300 ids instead of over 2 minutes).
+- nsdchat is not safe for concurrent use: two simultaneous calls fail with "can't create communication pipes ... .rcli.0: file already exists" (exit 10). archiware-mcp runs every call under `flock /tmp/archiware-mcp-nsdchat.lock` on the P5 host and retries exit 10 with backoff.
+
+## Cancelling a running or waiting job (verified live)
+
+Tested on a dry-run job (`BackupPlan <id> dryrun`, which only starts while the plan is enabled and has an event) of a throwaway plan:
+
+- `DELETE /rest/v1/general/jobs/<id>` **works**: HTTP 200, empty body; the job's nsdchat status turns `cancelled` (completion `exception`) within a second; afterwards REST `GET general/jobs/<id>` is 404.
+- nsdchat `Job <id> cancel` also works for a running job (returns 1; the status changes to `cancelled` a moment later). `Job <id> stop` and `cancel` on an already cancelled job: exit 100.
+
+`job_cancel <id>`:
 
 1. reads `GET general/jobs/<id>`; if not active it does nothing,
-2. sends `DELETE /rest/v1/general/jobs/<id>` (**unverified guess** at the REST cancel endpoint),
-3. polls the job state up to 3 times,
-4. if the job is still active: falls back to nsdchat `Job <id> cancel` (running) or `Job <id> stop` (waiting/scheduled),
-5. reports before/after state, the path used (`rest` or the nsdchat command) and any REST error.
-
-First live use must be on a harmless job and the report checked.
+2. sends the DELETE,
+3. polls the state (REST, or nsdchat when REST answers 404) up to 3 times,
+4. only if the job is still active: nsdchat `Job <id> cancel` (running) or `Job <id> stop` (waiting/scheduled),
+5. reports before/after state, completion, the path used (`rest` or the nsdchat command) and any REST error.
 
 ## archiware-mcp tools
 

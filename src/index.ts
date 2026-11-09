@@ -15,6 +15,7 @@ import * as ops from "./operations.js";
 import * as tape from "./tapeops.js";
 import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
+import * as tops from "./taskops.js";
 import { normalizeRestPath, restRequest, restResources } from "./rest.js";
 
 const cfg = loadConfig();
@@ -655,6 +656,129 @@ server.registerTool(
     try {
       normalizeRestPath(path);
       return text(await restRequest(cfg, method ?? "GET", path, body, Boolean(confirm)));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "job_history",
+  {
+    description:
+      "Past jobs (P5's job listing only returns scheduled ones, so job ids are walked downward from the newest known id, in batches). Per job: id, plan (describe), task (resourcename), status, completion, start time (server-local, from the protocol), size, files, and the source line ('Full save of: ...'). Scheduled jobs are excluded unless status is 'scheduled'. Filters: plan (name or id), status (status or completion, e.g. completed, running, failure), since (YYYY-MM-DD), limit (default 50).",
+    inputSchema: {
+      plan: z.string().optional().describe("Plan name or id"),
+      status: z.string().optional().describe("Job status or completion to match"),
+      since: z.string().optional().describe("Only jobs started on/after this date, YYYY-MM-DD or YYYY-MM-DDTHH:MM"),
+      limit: z.number().int().min(1).max(1000).optional().describe("Max rows, newest first (default 50)"),
+    },
+  },
+  async ({ plan, status, since, limit }) => {
+    try {
+      return text(await tops.jobHistory(cfg, { plan, status, since, limit }));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "find_tasks",
+  {
+    description: "Every backup plan and task whose directories contain the substring (case-insensitive), with the plan's and the task's enabled flag. One batched pass over all plans.",
+    inputSchema: { substring: z.string().min(1).describe("Part of a directory path") },
+  },
+  async ({ substring }) => {
+    try {
+      return text(await tops.findTasks(cfg, substring));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "task_enable",
+  {
+    description: "Enables a backup task and reads the flag back (reports before/after). Requires confirm:true; without it only the calls that WOULD run are returned.",
+    inputSchema: { task: z.string().describe("Task id"), confirm: confirmField },
+  },
+  async ({ task, confirm }) => {
+    try {
+      return text(await tops.taskSetEnabled(cfg, task, true, Boolean(confirm)));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "task_disable",
+  {
+    description: "Disables a backup task and reads the flag back (reports before/after). Requires confirm:true; without it only the calls that WOULD run are returned.",
+    inputSchema: { task: z.string().describe("Task id"), confirm: confirmField },
+  },
+  async ({ task, confirm }) => {
+    try {
+      return text(await tops.taskSetEnabled(cfg, task, false, Boolean(confirm)));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "task_set_directories",
+  {
+    description:
+      "Replaces the directory list of a backup task, reads it back and reports before/after; if P5 did not store exactly the requested list the old value is restored and an error is returned. Requires confirm:true.",
+    inputSchema: {
+      task: z.string().describe("Task id"),
+      directories: z.array(z.string()).min(1).describe("Absolute paths as seen by the P5 server"),
+      confirm: confirmField,
+    },
+  },
+  async ({ task, directories, confirm }) => {
+    try {
+      return text(await tops.taskSetDirectories(cfg, task, directories, Boolean(confirm)));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "run_tasks_once",
+  {
+    description:
+      "Backs up chosen tasks of a plan once, without running the whole plan. P5 cannot submit a task subset, so a temporary plan 'mcp-once-<timestamp>' with copies of those tasks and one event into the pool is created and started; returns the temp plan id and job id. The temp plan is kept until run_tasks_once_cleanup is called after the job finished. Requires confirm:true.",
+    inputSchema: {
+      plan: z.string().describe("Source plan id"),
+      tasks: z.array(z.string()).min(1).describe("Task ids of that plan"),
+      pool: z.string().optional().describe("Pool (default: pool of the plan's first event)"),
+      level: z.enum(["full", "incr"]).optional().describe("Backup level (default full)"),
+      confirm: confirmField,
+    },
+  },
+  async ({ plan, tasks, pool, level, confirm }) => {
+    try {
+      return text(await tops.runTasksOnce(cfg, plan, tasks, pool, level ?? "full", Boolean(confirm)));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "run_tasks_once_cleanup",
+  {
+    description: "Deletes a temporary plan created by run_tasks_once (only plans named mcp-once-*, refused while one of its jobs is running or pending). Requires confirm:true.",
+    inputSchema: { plan: z.string().describe("Temporary plan id"), confirm: confirmField },
+  },
+  async ({ plan, confirm }) => {
+    try {
+      return text(await tops.runTasksOnceCleanup(cfg, plan, Boolean(confirm)));
     } catch (e) {
       return err(e);
     }

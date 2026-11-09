@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- New `job_history` / `job-history`: past jobs with plan, task, status, completion, start, size, files and the protocol's source line; filters plan, status, since, limit. Walks job ids downward in batched calls (P5 lists only scheduled jobs).
+- New `find_tasks` / `find-tasks <substring>`: plans and tasks whose directories contain the substring, with plan and task enabled flags.
+- New `task_enable`, `task_disable`, `task_set_directories` / `task enable|disable|set-dirs`: confirm-gated, read back before/after.
+- New `run_tasks_once` / `run-once` and `run_tasks_once_cleanup`: one-off backup of chosen tasks through a temporary plan.
+- Every nsdchat call now runs under an exclusive `flock` on the P5 host and retries on P5's pipe-collision error, so concurrent sessions no longer break each other.
+- `job_cancel`: see REST.md for what was found live.
+
 ## 0.2.0
 
 - Three deployment modes, set with the config key `mode`: `docker` (P5 in a container on an ssh host, the previous behaviour), `ssh` (P5 installed natively on an ssh host) and `local` (P5 on the machine running the tool). All tools work in each mode; `container_*` tools report "not applicable" outside docker mode.

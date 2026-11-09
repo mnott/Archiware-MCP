@@ -17,6 +17,7 @@ import * as ops from "./operations.js";
 import * as tape from "./tapeops.js";
 import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
+import * as tops from "./taskops.js";
 import { restRequest, restResources, type RestMethod } from "./rest.js";
 import { P5Error } from "./transport.js";
 
@@ -60,6 +61,14 @@ Commands:
   tape_erase <slot...>                              DESTRUCTIVE: destroy tape contents (rewind + mt erase 0) (needs --yes)
   clean_drive <p5 device|gen>                       clean drive with CLN* tape, reset P5 cleaning flag (needs --yes)
   job_cancel <id>        cancel a running or waiting job via REST (needs --yes)
+  job-history [--plan <name|id>] [--status <s>] [--since YYYY-MM-DD] [--limit N]
+                         past jobs (newest first): plan, task, status, start, size, files, source line
+  find-tasks <substring> plans and tasks whose directories contain the substring (+ enabled flags)
+  task enable|disable <task>                      enable/disable a backup task, read back (needs --yes)
+  task set-dirs <task> <dir...>                   replace a task's directories, read back (needs --yes)
+  run-once <plan> <task...> [--pool P] [--level full|incr]
+                         back up chosen tasks once via a temporary plan (needs --yes)
+  run-once-cleanup <temp plan>                    delete a temporary run-once plan (needs --yes)
   health                 one-call P5 health check (exit code 1 on any fail; part of doctor)
   rest_resources         list the REST API resources
   rest <path> [--method GET|POST|PUT|DELETE] [--body <json>]
@@ -77,7 +86,7 @@ Options:
   --force  override the "library busy" check on tape_* / clean_drive
 `;
 
-const VALUE_FLAGS = new Set(["drive", "exception", "filter", "retention", "method", "body", "config", ...Object.keys(SETUP_FLAGS)]);
+const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", ...Object.keys(SETUP_FLAGS)]);
 
 function parseArgs(argv: string[]) {
   const flags = new Set<string>();
@@ -180,6 +189,20 @@ function printResult(name: string, data: unknown, json: boolean) {
       console.log(`Resource: ${j.resourcegroup} ${j.resourcename}; started ${j.runat ?? "-"}; ${j.totalkbytes_human ?? "-"}, ${j.totalfiles ?? "-"} files`);
       if (j.report) console.log(`\nReport:\n${j.report}`);
       if (j.protocol) console.log(`\nProtocol:\n${j.protocol}`);
+      break;
+    }
+    case "job-history": {
+      const h = d as unknown as { jobs: Record<string, unknown>[]; scannedIds: number; roundTrips: number };
+      table(h.jobs, ["id", "plan", "task", "status", "completion", "start", "size", "files", "source"]);
+      console.log(`\n${h.jobs.length} job(s); ${h.scannedIds} ids scanned in ${h.roundTrips} ssh round trips`);
+      break;
+    }
+    case "find-tasks":
+      table((d as unknown as { matches: Record<string, unknown>[] }).matches, ["plan", "describe", "plan_enabled", "task", "task_enabled", "directories"]);
+      break;
+    case "task": {
+      const t = d as unknown as { task: string; before: Record<string, unknown>; after: Record<string, unknown> };
+      console.log(`Task ${t.task}: ${JSON.stringify(t.before)} -> ${JSON.stringify(t.after)}`);
       break;
     }
     case "tape_read_header": {
@@ -395,6 +418,42 @@ async function main() {
       const jukebox = positional[1];
       if (!jukebox) throw new Error("usage: archiware inventory <jukebox> [--barcode] --yes");
       printResult("inventory", await ops.inventory(cfg, jukebox, flags.has("barcode"), yes), json);
+      break;
+    }
+    case "job-history": {
+      const lim = values.get("limit");
+      printResult("job-history", await tops.jobHistory(cfg, { plan: values.get("plan"), status: values.get("status"), since: values.get("since"), limit: lim === undefined ? undefined : Number(lim) }), json);
+      break;
+    }
+    case "find-tasks": {
+      const sub = positional[1];
+      if (!sub) throw new Error("usage: archiware find-tasks <substring>");
+      printResult("find-tasks", await tops.findTasks(cfg, sub), json);
+      break;
+    }
+    case "task": {
+      const [sub, task, ...dirs] = positional.slice(1);
+      if (sub === "enable" || sub === "disable") {
+        if (!task) throw new Error(`usage: archiware task ${sub} <task> --yes`);
+        printResult("task", await tops.taskSetEnabled(cfg, task, sub === "enable", yes), json);
+      } else if (sub === "set-dirs") {
+        if (!task || dirs.length === 0) throw new Error("usage: archiware task set-dirs <task> <dir...> --yes");
+        printResult("task", await tops.taskSetDirectories(cfg, task, dirs, yes), json);
+      } else throw new Error("usage: archiware task enable|disable|set-dirs <task> [dirs...] --yes");
+      break;
+    }
+    case "run-once": {
+      const [planId, ...tasks] = positional.slice(1);
+      const level = values.get("level") ?? "full";
+      if (!planId || tasks.length === 0) throw new Error("usage: archiware run-once <plan> <task...> [--pool P] [--level full|incr] --yes");
+      if (level !== "full" && level !== "incr") throw new Error("--level must be full or incr");
+      printResult("run-once", await tops.runTasksOnce(cfg, planId, tasks, values.get("pool"), level, yes), json);
+      break;
+    }
+    case "run-once-cleanup": {
+      const planId = positional[1];
+      if (!planId) throw new Error("usage: archiware run-once-cleanup <temp plan> --yes");
+      printResult("run-once-cleanup", await tops.runTasksOnceCleanup(cfg, planId, yes), json);
       break;
     }
     case "job_cancel": {

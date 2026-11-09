@@ -525,7 +525,7 @@ function describeCmd(cfg: ArchiwareConfig, args: string[]): string {
 }
 
 /** Mutating call: without confirm only report the command that WOULD run. */
-async function mutate(cfg: ArchiwareConfig, args: string[], confirm: boolean, note: string) {
+export async function mutate(cfg: ArchiwareConfig, args: string[], confirm: boolean, note: string) {
   if (!confirm) {
     const would: WouldRun = { wouldRun: describeCmd(cfg, args), note };
     return { confirmationRequired: true as const, ...would };
@@ -535,7 +535,7 @@ async function mutate(cfg: ArchiwareConfig, args: string[], confirm: boolean, no
 }
 
 /** Multi-step mutation: without confirm, list every call that WOULD run (<...> = value from an earlier step). */
-function wouldRunSteps(cfg: ArchiwareConfig, steps: string[][], note: string) {
+export function wouldRunSteps(cfg: ArchiwareConfig, steps: string[][], note: string) {
   return { confirmationRequired: true as const, wouldRun: steps.map((a) => describeCmd(cfg, a)), note };
 }
 

@@ -106,6 +106,12 @@ archiware start_plan <id> --yes  start a backup now
 archiware enable_plan <id> --yes / disable_plan <id> --yes
 archiware stop_job <id> --yes    stop a scheduled job
 archiware job_cancel <id> --yes  cancel a running or waiting job (REST)
+archiware job-history [--plan <name|id>] [--status s] [--since YYYY-MM-DD] [--limit N]   past jobs (newest first): task, status, start, size, files, source line
+archiware find-tasks <substring>                        plans/tasks whose directories contain the substring, with enabled flags
+archiware task enable|disable <task> --yes              enable/disable one backup task (read back, before/after)
+archiware task set-dirs <task> <dir...> --yes           replace a task's directories (read back; old value restored if P5 stored something else)
+archiware run-once <plan> <task...> [--pool P] [--level full|incr] --yes   back up chosen tasks once via a temporary plan
+archiware run-once-cleanup <temp plan> --yes            delete a temporary run-once plan after its job finished
 archiware create_plan / delete_plan / set_plan_retention / plan_event / add_plan_folder(s)   plan editing (--yes)
 archiware volume_enable <volume> on|off --yes
 archiware restore_lookup <volume|job> [--job]            what a backup volume holds
@@ -128,7 +134,14 @@ archiware container_status | container_backup | container_stop | container_start
 
 ## MCP tools
 
-Same names as the CLI subcommands (`status`, `slots`, `volumes`, `pools`, `plans`, `plan`, `jobs`, `job`, `dryrun_plan`, `start_plan`, `enable_plan`, `disable_plan`, `stop_job`, `job_cancel`, plan editing tools, `volume_enable`, `restore_lookup`, `restore`, `label_tapes`, `inventory`, `set_cleaning`, `tape_*`, `clean_drive`, `health`, `rest_resources`, `rest`, `nsdchat`, `container_*`). `archiware setup` registers the server with `claude mcp add` (user scope); by hand: `claude mcp add archiware -s user -- archiware-mcp`.
+Same names as the CLI subcommands (`status`, `slots`, `volumes`, `pools`, `plans`, `plan`, `jobs`, `job`, `dryrun_plan`, `start_plan`, `enable_plan`, `disable_plan`, `stop_job`, `job_cancel`, `job_history`, `find_tasks`, `task_enable`, `task_disable`, `task_set_directories`, `run_tasks_once`, `run_tasks_once_cleanup`, plan editing tools, `volume_enable`, `restore_lookup`, `restore`, `label_tapes`, `inventory`, `set_cleaning`, `tape_*`, `clean_drive`, `health`, `rest_resources`, `rest`, `nsdchat`, `container_*`). `archiware setup` registers the server with `claude mcp add` (user scope); by hand: `claude mcp add archiware -s user -- archiware-mcp`.
+
+## Notes on the newer tools
+
+- `job-history`: P5's job listing returns only scheduled jobs, so history is enumerated by walking job ids downward from the newest known id (100 ids per nsdchat call, using one Tcl foreach) until 60 consecutive ids are unknown. Scheduled jobs are skipped unless `--status scheduled`. The start time is the "Client time" line of the job protocol (server-local time); index jobs have none.
+- `run-once`: P5 has no call that submits a subset of a plan's tasks, so the tasks are copied into a temporary plan `mcp-once-<timestamp>` with one event into the pool and that plan is started. The temporary plan is kept while the job runs; delete it with `run-once-cleanup <plan>` once the job finished (only `mcp-once-*` plans, refused while a job of it is active).
+- `task set-dirs`: P5's `dirlist` setter stores several arguments as ONE list element on tested versions; the tool reads the value back, restores the old one and reports an error if it differs from the request. One directory per task always works.
+- All nsdchat calls take an exclusive `flock` on the P5 host (`/tmp/archiware-mcp-nsdchat.lock`, 120 s wait), because two simultaneous nsdchat calls collide ("can't create communication pipes", exit 10). Separate CLI/MCP processes therefore serialise; exit 10 is retried with backoff. Hosts without `flock` run unlocked.
 
 ## Safety model
 

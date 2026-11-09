@@ -122,12 +122,29 @@ export interface CallResult {
 const RECORD = /\x1e(\d+)\x1e\n/;
 const MAX_BATCH = 40;
 
-/** Remote shell string for a batch: one non-interactive `nsdchat -c` per command, each followed by a record carrying its exit code. */
+/**
+ * nsdchat is not safe for concurrent use (two simultaneous calls fail with
+ * "can't create communication pipes ... .rcli.0: file already exists", exit 10).
+ * Every call therefore runs under an exclusive flock on the P5 host, so separate
+ * CLI/MCP processes and sessions serialise. Without flock on the host the call runs unlocked.
+ */
+export const LOCK_FILE = "/tmp/archiware-mcp-nsdchat.lock";
+export const LOCK_WAIT_S = 120;
+export const LOCK_TIMEOUT_RC = 99;
+const LOCK_FN = `l(){ if command -v flock >/dev/null 2>&1; then flock -w ${LOCK_WAIT_S} -E ${LOCK_TIMEOUT_RC} ${LOCK_FILE} "$@"; else "$@"; fi; }`;
+
+/** Remote shell string for a batch: one non-interactive `nsdchat -c` per command (under the host lock), each followed by a record carrying its exit code. */
 export function buildBatchCommand(cfg: ArchiwareConfig, commands: string[][]): string {
-  return commands
-    .map((c) => `${buildRemoteCommand(cfg, c)} 2>&1; printf '\\036%s\\036\\n' "$?"`)
-    .join("; ");
+  return (
+    LOCK_FN +
+    "; " +
+    commands.map((c) => `l ${buildRemoteCommand(cfg, c)} 2>&1; printf '\\036%s\\036\\n' "$?"`).join("; ")
+  );
 }
+
+/** exit 10 with P5's pipe-collision message: another nsdchat ran at the same moment. */
+export const isPipeCollision = (r: CallResult): boolean => r.rc === 10 && /communication pipes/.test(r.out);
+const RETRY_BACKOFF_MS = [500, 1500, 3000, 6000];
 
 /** Split batch stdout on the \x1e<rc>\x1e records into one { out, rc } per command. */
 export function parseRecords(stdout: string, expected: number): CallResult[] {
@@ -161,7 +178,16 @@ export async function nsdchatCalls(
         timeout: timeoutMs,
         maxBuffer: 64 * 1024 * 1024,
       });
-      all.push(...parseRecords(stdout, chunk.length));
+      const res = parseRecords(stdout, chunk.length);
+      for (let attempt = 0; attempt < RETRY_BACKOFF_MS.length; attempt++) {
+        const bad = res.map((r, k) => (isPipeCollision(r) ? k : -1)).filter((k) => k >= 0);
+        if (bad.length === 0) break;
+        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS[attempt]));
+        const l2 = launch(cfg, buildBatchCommand(cfg, bad.map((k) => chunk[k])));
+        const again = parseRecords((await execFileAsync(l2.cmd, l2.args, { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 })).stdout, bad.length);
+        bad.forEach((k, j) => (res[k] = again[j]));
+      }
+      all.push(...res);
     } catch (e) {
       if (e instanceof P5Error) throw e;
       const err = e as { killed?: boolean; stderr?: string; message?: string };
@@ -181,6 +207,8 @@ export async function nsdchat(cfg: ArchiwareConfig, args: string[], timeoutMs = 
 
 function checked(args: string[], r: CallResult): string | null {
   const out = r.out.trim();
+  if (r.rc === LOCK_TIMEOUT_RC && out === "") throw new P5Error(`nsdchat: gave up waiting ${LOCK_WAIT_S}s for the host lock ${LOCK_FILE} (another nsdchat session is busy): ${args.join(" ")}`);
+  if (isPipeCollision(r)) throw new P5Error(`nsdchat kept colliding with another concurrent nsdchat call (exit 10) after retries: ${args.join(" ")}\n${out}`, out);
   if (r.rc !== 0) throw new P5Error(`nsdchat failed (exit ${r.rc}): ${args.join(" ")}\n${out}`, out);
   return out === "" || out === "<empty>" ? null : out;
 }
