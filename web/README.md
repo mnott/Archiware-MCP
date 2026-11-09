@@ -1,41 +1,34 @@
-# Catalogue web page
+# Catalogue web page (optional component)
 
-Read-only companion to the P5 web UI for the archiware-mcp tar catalogue: search the files that were packed into tars, see per hit which tar holds it, whether the tar is still on disk, and where it sits on tape (P5 volume label, barcode, library slot / mail slot / not in the library). The detail view shows the exact `catalog_restore` command and a link to the P5 web UI. There is no restore button: restores stay confirm-gated in the MCP server / CLI.
+Read-only web page for the archiware-mcp catalogue: search by file name across the tar catalogue and P5's backup index copy, see per version where it can be fetched from (on disk, tape in library, tape offline with barcode), browse sets, and copy the exact restore command. It never restores anything itself.
 
-Pages: `/` search (substring or glob `*` `?`, optional set filter), `/hit` detail, `/sets`, `/browse?set=NAME[&dir=sub/folder]` folder browse.
+This directory is a self-contained compose project of three containers on an external docker network:
 
-One container, Node 22, one runtime dependency (`mysql2`). Nothing is written inside the container (`read_only: true`); secrets and config are mounted.
-
-## Data sources
-
-| What | How |
+| Service | What it does |
 |---|---|
-| sets, tars, files | MySQL `archive_catalog`, user `catalog_ro` with `SELECT` only |
-| tape versions of a tar | P5's backup index (SQLite, mounted read-only, opened `immutable`); same lookup as `indexVersions()` in `src/p5db.ts` of archiware-mcp (copied, with `node:sqlite`) |
-| volume label, barcode, location | P5 REST `general/volumes` (cached 2 min). Location text `... : Slot N` is a library slot, or a mail slot if N is in `mailSlots`; `isonline: false` = not in the library |
-| tar on disk | the pack root mounted read-only; `stat` of the tar |
+| `catalog` | The web page (built from `Dockerfile`, Node 22, one runtime dependency `mysql2`). Port 8080 on a fixed IP |
+| `catalog-db` | Its own MariaDB 11.4 with the catalogue database `archive_catalog`; data directory on the host; port 3306 on a fixed IP |
+| `catalog-dump` | One `mariadb-dump` per night into `./dumps`, last 14 kept |
 
-## Install
+Files here:
 
-1. Read-only MySQL user (run on the P5 host; the container's root password stays inside the mysql container):
+| File | Purpose |
+|---|---|
+| `docker-compose.yaml` | The three services; site values come from `.env` |
+| `.env.example` | Template for `.env` (network, IPs, host paths, user id, time zone) |
+| `config/config.example.json` | Template for `config/config.json` (page settings) |
+| `secrets/secrets.example.json` | Template for `secrets/secrets.json` (database user, P5 REST user, login hash, session secret) |
+| `dump.sh` | The nightly dump loop of `catalog-dump` |
+| `src/server.ts`, `src/hashpw.ts` | The page, and a tool that prints a login password hash |
 
-   ```
-   docker exec -i mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD"' <<SQL
-   CREATE USER 'catalog_ro'@'<web container ip>' IDENTIFIED BY '<generated password>';
-   GRANT SELECT ON archive_catalog.* TO 'catalog_ro'@'<web container ip>';
-   SQL
-   ```
+`archiware viewer_deploy` copies this directory to the docker host, generates the secrets, writes `.env` and `config/config.json`, starts the stack, creates the database users and the schema, and points the MCP at the new database. `secrets/`, `.env`, `data/` and `dumps/` are never copied from here and are ignored by `.gitignore`.
 
-2. Pick a free address on the docker network (`docker network inspect dockernet` lists the used ones; confirm with a `ping` from the host) and put it into `docker-compose.yaml` (`ipv4_address`, example value is from the documentation range).
-3. `cp config/config.example.json config/config.json` and edit: `p5BaseUrl` (link target), `p5RestUrl`, `mysqlHost`, `packRoot` (as stored in the catalogue), `packRootP5` (the same directory as P5 sees it), `mailSlots`.
-4. `cp secrets/secrets.example.json secrets/secrets.json` and fill it: MySQL password, P5 REST user/password (a read-only P5 user is better than `admin`), basic-auth user and hash. Create the hash with `docker compose run --rm catalog node dist/hashpw.js 'the password'`. The container runs as uid 1000: `chown 1000:1000 secrets secrets/secrets.json; chmod 500 secrets; chmod 400 secrets/secrets.json`.
-5. Edit the two host paths in `docker-compose.yaml` (P5 `config/index/backup`, pack root), then `docker compose up -d --build`.
-6. `curl -u user:password http://<ip>:8080/sets`
+Full documentation: [docs/web-viewer.md](../docs/web-viewer.md): setup (tool, setup skill, by hand), `.env` and secrets, login and password change, reverse proxy under a sub-path (Apache, nginx), backups, upgrade, uninstall, migrating an existing catalogue database, troubleshooting.
 
-Basic auth is sent in clear text: put the page behind the reverse proxy with TLS before using it beyond a trusted LAN.
+Quick start by hand, in a copy of this directory on the docker host:
 
-## Notes
-
-- A missing index mount, an unreachable P5 REST or a path P5 never backed up shows as "tape lookup failed" / "not on tape" on that hit; the rest of the page keeps working.
-- A hit lists at most 100 results; the tape column is looked up for the first 40 distinct tars of a result list.
-- `secrets/` is gitignored.
+```
+cp .env.example .env && cp config/config.example.json config/config.json
+# edit both, create secrets/ (see docs/web-viewer.md), then:
+docker compose up -d --build
+```

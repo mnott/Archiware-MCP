@@ -14,6 +14,7 @@
  * awaits of chatBatch calls.
  */
 
+import { beginGuard, destOf, finishGuard, type Safety } from "./restoreguard.js";
 import type { ArchiwareConfig } from "./config.js";
 import {
   buildRemoteCommand,
@@ -313,6 +314,12 @@ export async function volumes(cfg: ArchiwareConfig) {
   });
   const volRes = ids.length ? await batch(cfg, ids.flatMap((id) => volumeAttrs(id))) : [];
   return ids.map((id, i) => volumeInfoFrom(id, poolByVolume.get(id) ?? null, volRes.slice(i * 10, i * 10 + 10)));
+}
+
+/** Only the named volumes (no pool lookup): far cheaper than volumes() on a server with many volumes. */
+export async function volumesByIds(cfg: ArchiwareConfig, ids: string[]) {
+  const res = ids.length ? await batch(cfg, ids.flatMap((id) => volumeAttrs(id))) : [];
+  return ids.map((id, i) => volumeInfoFrom(id, null, res.slice(i * 10, i * 10 + 10)));
 }
 
 export async function pools(cfg: ArchiwareConfig) {
@@ -902,7 +909,7 @@ export const nsdchatRaw = (cfg: ArchiwareConfig, args: string[], confirm: boolea
 // ---------------------------------------------------------------------------
 
 /** Run a command inside the P5 container (needed for files nsdchat writes there). */
-async function containerExec(cfg: ArchiwareConfig, argv: string[]): Promise<string> {
+export async function containerExec(cfg: ArchiwareConfig, argv: string[]): Promise<string> {
   const r = await hostCommand(cfg, p5Exec(cfg, argv), 60_000);
   if (r.rc !== 0) throw new P5Error(`container command failed (exit ${r.rc}): ${argv.join(" ")}`, r.stderr);
   return r.stdout;
@@ -944,51 +951,137 @@ export async function restoreLookup(cfg: ArchiwareConfig, source: { volume?: str
   return { source: kind.toLowerCase(), id, volumes, entryCount: entries.length, entries };
 }
 
-const isUnder = (p: string, root: string) => p === root || p.startsWith(root.replace(/\/+$/, "") + "/");
+
+const normPath = (p: string) => p.replace(/\/+$/, "") || "/";
+
+function restoreChecks(path: string, safety: Safety) {
+  if (!path.startsWith("/")) throw new P5Error("path must be absolute");
+  if (safety.to === "original") {
+    throw new P5Error("restore into a folder (default) and move what you need; in-place P5 restores are not offered because conflicts cannot be checked at write time (the P5 restore job runs asynchronously inside P5)");
+  }
+  if (safety.onConflict === "rename") {
+    throw new P5Error("--on-conflict rename is not possible for a P5 restore (the job is asynchronous, nothing can be renamed after it); restore into the default restore folder, or use catalog_restore / restore_version for a single file from a tar");
+  }
+}
 
 /**
- * Restore a backed-up folder to an ALTERNATE directory; originals are never touched.
- * RestoreSelection can only take a whole backup volume (addfromvolume) for backup indexes
- * (addentry/findentry need archive handles), so the restore is refused unless every
- * entry on the volume lies at or above `path` (ancestor directories only) or below it.
- * Returns the restore job id.
+ * EXPLICIT whole-volume restore: every file on the backup volume goes to an alternate directory.
+ * Never used for a single path (P5's CLI cannot select one path of a BACKUP version; see restore_version).
+ * Preview shows the volume and its used size; confirming needs the planId.
  */
-export async function restore(cfg: ArchiwareConfig, volume: string, path: string, target: string, confirm: boolean) {
-  const norm = (p: string) => p.replace(/\/+$/, "") || "/";
-  path = norm(path);
-  target = norm(target);
-  if (!path.startsWith("/") || !target.startsWith("/")) throw new P5Error("path and target must be absolute");
-  if (target === "/" || isUnder(target, path) || isUnder(path, target)) {
-    throw new P5Error("target must be a separate directory, not the original path, inside it, or a parent of it");
-  }
-  const lookup = await restoreLookup(cfg, { volume });
-  const foreign = lookup.entries.filter((e) => !isUnder(e.path, path) && !isUnder(path, e.path));
-  if (!lookup.entries.some((e) => isUnder(e.path, path))) {
-    throw new P5Error(`volume ${volume} holds nothing under ${path}`);
-  }
-  if (foreign.length > 0) {
-    throw new P5Error(
-      `volume ${volume} also holds ${foreign.length} entries outside ${path} (e.g. ${foreign[0].path}); selecting a path within a backup volume is not possible via the CLI, refusing to restore the whole volume`,
-    );
-  }
-  const note = `Restores everything on backup volume ${volume} (all under ${path}) into ${target}; originals are not touched.`;
+export async function restoreVolume(cfg: ArchiwareConfig, volume: string, safety: Safety) {
+  restoreChecks("/", safety);
+  const g = beginGuard(cfg, safety, { p5: true });
+  const target = g.base;
+  const [label, usedKb, loc, barcode] = await Promise.all(["label", "usedsize", "location", "barcode"].map((k) => nsdchat(cfg, ["Volume", volume, k]).then((s) => s.trim(), () => "")));
+  if (!label && !usedKb) throw new P5Error(`unknown volume ${volume}`);
+  const bytes = (Number(usedKb) || 0) * 1024;
+  const guard = await finishGuard(
+    cfg,
+    g,
+    {
+      sourceKey: `p5-volume:${volume}`,
+      source: `WHOLE P5 backup volume ${label || volume} (id ${volume}), barcode ${barcode || "none"}, ${loc || "location unknown"}`,
+      inContainer: true,
+      files: [],
+      totals: { entries: 0, bytes },
+      notes: ["this restores EVERYTHING on the volume (all clients, all paths); the tree is not listed (a volume inventory takes minutes)", "bytes is the volume's used size", "the job runs asynchronously; the id is returned and the job is not waited for"],
+    },
+    safety,
+  );
   const steps = [
     ["RestoreSelection", "create", "localhost", target],
     ["RestoreSelection", "<selection>", "addfromvolume", volume],
-    ["RestoreSelection", "<selection>", "describe", `restore ${path} to ${target}`],
+    ["RestoreSelection", "<selection>", "describe", `restore volume ${volume} to ${target}`],
     ["RestoreSelection", "<selection>", "submit"],
   ];
-  if (!confirm) return { ...wouldRunSteps(cfg, steps, note), mkdir: describeRemote(cfg, p5Exec(cfg, ["mkdir", "-p", target]).map(shellQuote).join(" ")) };
+  if (!guard.proceed) return { ...guard.preview, wouldRun: steps.map((s) => describeCmd(cfg, s)) };
   await containerExec(cfg, ["mkdir", "-p", target]);
   const sel = (await nsdchat(cfg, steps[0])).trim();
   if (!sel) throw new P5Error("RestoreSelection create returned no name");
   try {
     const added = (await nsdchat(cfg, ["RestoreSelection", sel, "addfromvolume", volume])).trim();
     if (added !== volume) throw new P5Error(`addfromvolume did not accept volume ${volume}`);
+    await nsdchat(cfg, ["RestoreSelection", sel, "describe", `restore volume ${volume} to ${target}`]);
+    const job = (await nsdchat(cfg, ["RestoreSelection", sel, "submit"])).trim();
+    if (!job) throw new P5Error("RestoreSelection submit returned no job id");
+    return { confirmationRequired: false as const, job, volume, target, conflictPolicy: g.policy };
+  } catch (e) {
+    await nsdchat(cfg, ["RestoreSelection", sel, "destroy"]).catch(() => undefined);
+    throw e;
+  }
+}
+
+/** Archive index entry (file or folder) -> handle, size and volumes, from the index inventory (one walk of the index). */
+export async function archiveEntryHandle(cfg: ArchiwareConfig, index: string, path: string) {
+  const file = `/tmp/amcp-archinv-${process.pid}-${Date.now()}.txt`;
+  await nsdchatLong(cfg, ["ArchiveIndex", index, "inventory", file, "handle", "size", "btime", "volumes"]);
+  let raw: string;
+  try {
+    raw = await containerExec(cfg, ["cat", file]);
+  } finally {
+    await containerExec(cfg, ["rm", "-f", file]).catch(() => undefined);
+  }
+  for (const l of raw.split("\n")) {
+    const [p, handle, size, btime, vols] = l.split("\t");
+    if (p === path && handle) return { handle, size: Number(size) || 0, btime: Number(btime) || 0, volumes: (vols ?? "").split(/\s+/).filter(Boolean) };
+  }
+  throw new P5Error(`${path} is not in the archive index ${index}`);
+}
+
+/**
+ * Restore ONE entry of an ARCHIVE index (P5 archive plans): RestoreSelection create <client> <relocate>,
+ * addentry <handle>, size/entries read back, submit. Only archive entries have handles; BACKUP versions have none
+ * (see restore_version). The destination is <dir>/<original path> as P5 places it under the relocate directory.
+ */
+export async function restoreArchiveEntry(cfg: ArchiwareConfig, path: string, safety: Safety, index = "Default-Archive") {
+  path = normPath(path);
+  restoreChecks(path, safety);
+  const g = beginGuard(cfg, safety, { p5: true });
+  const target = g.base;
+  const h = await archiveEntryHandle(cfg, index, path);
+  // read-only probe: a selection is created, filled, measured and destroyed; nothing is submitted
+  let entries = 0;
+  let size = 0;
+  const probe = (await nsdchat(cfg, ["RestoreSelection", "create", "localhost", "/"])).trim();
+  try {
+    await nsdchat(cfg, ["RestoreSelection", probe, "addentry", h.handle]);
+    entries = Number((await nsdchat(cfg, ["RestoreSelection", probe, "entries"]).catch(() => "0")).trim()) || 0;
+    size = Number((await nsdchat(cfg, ["RestoreSelection", probe, "size"]).catch(() => "0")).trim()) || 0;
+  } finally {
+    await nsdchat(cfg, ["RestoreSelection", probe, "destroy"]).catch(() => undefined);
+  }
+  if (entries === 0) throw new P5Error(`P5 selects nothing for ${path}: the entry is on no volume that is online (volumes recorded: ${h.volumes.join(", ") || "none"}); bring the tape into the library (tape_import) and retry`);
+  const guard = await finishGuard(
+    cfg,
+    g,
+    {
+      sourceKey: `p5-archive:${index}:${path}:${h.btime}`,
+      source: `P5 archive index ${index}, entry ${path}, archived ${new Date(h.btime * 1000).toISOString()}, volume(s) ${h.volumes.join(", ") || "?"}`,
+      inContainer: true,
+      files: [{ dest: destOf(g, path), size: h.size || size, mtime: h.btime }],
+      totals: { entries, bytes: size || h.size },
+      notes: ["restored via RestoreSelection addentry <archive handle>; a folder entry restores everything below it", "the job runs asynchronously; the id is returned and the job is not waited for"],
+    },
+    safety,
+  );
+  const steps = [
+    ["RestoreSelection", "create", "localhost", target],
+    ["RestoreSelection", "<selection>", "addentry", h.handle],
+    ["RestoreSelection", "<selection>", "describe", `restore ${path} to ${target}`],
+    ["RestoreSelection", "<selection>", "submit"],
+  ];
+  if (!guard.proceed) return { ...guard.preview, wouldRun: steps.map((s) => describeCmd(cfg, s)) };
+  await containerExec(cfg, ["mkdir", "-p", target]);
+  const sel = (await nsdchat(cfg, steps[0])).trim();
+  if (!sel) throw new P5Error("RestoreSelection create returned no name");
+  try {
+    const added = (await nsdchat(cfg, ["RestoreSelection", sel, "addentry", h.handle])).trim();
+    if (!added) throw new P5Error(`addentry did not accept ${path}`);
     await nsdchat(cfg, ["RestoreSelection", sel, "describe", `restore ${path} to ${target}`]);
     const job = (await nsdchat(cfg, ["RestoreSelection", sel, "submit"])).trim();
     if (!job) throw new P5Error("RestoreSelection submit returned no job id");
-    return { confirmationRequired: false as const, job, volume, path, target, entries: lookup.entryCount };
+    return { confirmationRequired: false as const, job, path, target, entries, conflictPolicy: g.policy };
   } catch (e) {
     await nsdchat(cfg, ["RestoreSelection", sel, "destroy"]).catch(() => undefined);
     throw e;

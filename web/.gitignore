@@ -2,3 +2,7 @@ secrets/*
 !secrets/.gitkeep
 node_modules/
 dist/
+.env
+data/
+dumps/
+!secrets/secrets.example.json

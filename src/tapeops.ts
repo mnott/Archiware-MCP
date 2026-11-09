@@ -14,7 +14,7 @@
 
 import type { ArchiwareConfig, DriveConfig } from "./config.js";
 import { chatNames, hostCommand, mtxStatus, nsdchat, parseTclList, P5Error, rawBatch, shellQuote, describeRemote, p5Exec } from "./transport.js";
-import { parseMtx, type MtxStatus } from "./operations.js";
+import { parseMtx, volumes as p5Volumes, type MtxStatus, type VolumeInfo } from "./operations.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -310,22 +310,46 @@ function ifArg(nst: string): string {
 // tape_erase
 // ---------------------------------------------------------------------------
 
-/** DESTRUCTIVE short erase (rewind + `mt erase 0`), one tape at a time. */
-export async function tapeErase(cfg: ArchiwareConfig, slots: number[], confirm: boolean, force = false): Promise<TapeOpResult> {
-  const mtx = parseMtx(await mtxStatus(cfg));
+/** Injectable collaborators (unit tests stub these; production uses the real ones). */
+export interface EraseDeps {
+  volumes: (cfg: ArchiwareConfig) => Promise<VolumeInfo[]>;
+  mtxStatus: (cfg: ArchiwareConfig) => Promise<string>;
+}
+const realEraseDeps: EraseDeps = { volumes: p5Volumes, mtxStatus };
+
+/** Targets whose tape P5 still knows as a volume, or whose barcode is unknown ("?"). */
+export function eraseRefusals(targets: { slot: number; barcode: string }[], vols: VolumeInfo[]): string[] {
+  const out: string[] = [];
+  for (const t of targets) {
+    if (t.barcode === "?") {
+      out.push(`slot ${t.slot}: barcode unknown, cannot check P5; pass --erase-known to erase anyway`);
+      continue;
+    }
+    const v = vols.find((x) => x.barcode?.toUpperCase() === t.barcode.toUpperCase());
+    if (v) out.push(`slot ${t.slot} barcode ${t.barcode}: P5 volume ${v.id} in pool ${v.pool ?? "none"}: erase it in P5 first (recycle/remove the volume) or pass --erase-known`);
+  }
+  return out;
+}
+
+/** DESTRUCTIVE short erase (rewind + `mt erase 0`), one tape at a time. Refuses tapes P5 still knows unless eraseKnown. */
+export async function tapeErase(cfg: ArchiwareConfig, slots: number[], confirm: boolean, force = false, eraseKnown = false, deps: EraseDeps = realEraseDeps): Promise<TapeOpResult> {
+  const mtx = parseMtx(await deps.mtxStatus(cfg));
   const targets: { slot: number; barcode: string; gen: string; drive: DriveConfig }[] = [];
   for (const slot of slots) {
     const { barcode, drive: d } = driveForSlotTape(cfg, mtx, slot);
     targets.push({ slot, barcode: barcode ?? "?", gen: d.gen, drive: d });
   }
+  const refused = eraseKnown ? [] : eraseRefusals(targets, await deps.volumes(cfg));
   const note = `DESTRUCTIVE: short-erases the tapes in slots ${slots.join(", ")} — this DESTROYS all their contents (rewind + mt erase 0). One tape at a time.`;
   if (!confirm) {
     return {
       confirmationRequired: true,
+      ...(refused.length ? { refused, refusedNote: "these targets would be refused; confirm fails unless P5 no longer knows them or --erase-known is passed" } : {}),
       wouldRun: targets.flatMap((t) => cycleCommands(cfg, t.drive, t.slot, [["sudo", "-n", "mt", "-f", t.drive.nst, "erase", "0"]])),
       note,
     };
   }
+  if (refused.length) throw new P5Error(`refusing to erase: ${refused.join("; ")}`);
   await guardBusy(cfg, mtx, targets.map((t) => t.drive), force);
   const results: Record<string, unknown>[] = [];
   for (const t of targets) {

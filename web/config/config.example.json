@@ -4,12 +4,14 @@
   "p5RestUrl": "https://192.0.2.10:8443",
   "p5Client": "localhost",
   "indexDir": "/p5index",
-  "mysqlHost": "192.0.2.20",
+  "mysqlHost": "192.0.2.31",
   "mysqlPort": 3306,
   "mysqlDatabase": "archive_catalog",
   "packRoot": "/srv/archive/pack",
   "packRootMount": "/packroot",
+  "restoreRoot": "/srv/archive/pack/restore",
   "packRootP5": "/mnt/archive/pack",
   "mailSlots": [],
-  "cliName": "archiware"
+  "cliName": "archiware",
+  "cacheTtlMinutes": 60
 }

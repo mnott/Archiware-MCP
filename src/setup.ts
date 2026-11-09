@@ -21,7 +21,9 @@ import { homedir } from "node:os";
 import { buildConfig, configPath, MODES, readConfigFile, type ArchiwareConfig, type Mode } from "./config.js";
 import { doctorExitCode, formatDoctor, nodeMajor, runDoctor, type DoctorLine } from "./doctor.js";
 import { hostCommand, mtxStatus } from "./transport.js";
+import { configDir } from "./p5db.js";
 import { parseMtx } from "./operations.js";
+import { viewerDeploy, viewerHost } from "./viewer.js";
 
 export interface SetupOptions {
   config?: string;
@@ -270,6 +272,9 @@ export async function runSetup(opts: SetupOptions): Promise<number> {
     console.error(`    missing and no terminal to ask on. Create it yourself:\n      umask 077; read -rs PW && printf '%s\\n' "$PW" > ${pwf}\n    or re-run \`archiware setup\` in a terminal.`);
   }
 
+  // ---- optional: catalogue viewer ----
+  if (ask && !opts.yes && existsSync(cfg.restPasswordFile)) await offerViewer(cfg, file, ask);
+
   // ---- register with Claude Code ----
   step("register with Claude Code");
   if (opts.noRegister) console.error("    skipped (--no-register)");
@@ -280,6 +285,45 @@ export async function runSetup(opts: SetupOptions): Promise<number> {
   lines.push(...(await runDoctor(cfg, file)));
   console.log(formatDoctor(lines));
   return doctorExitCode(lines);
+}
+
+/** Optional step after the P5 connection: deploy the catalogue viewer (web page + its own database) on a docker host. */
+async function offerViewer(cfg: ArchiwareConfig, file: string, ask: Ask): Promise<void> {
+  step("catalogue viewer (optional)");
+  const yn = (await ask("Deploy the catalogue viewer (web page + its own database) on the docker host? [y/N]", "N")).trim().toLowerCase();
+  if (yn !== "y" && yn !== "yes") {
+    console.error("    skipped; later run `archiware viewer_deploy --network N --catalog-ip IP --db-ip IP` (plan without --yes)");
+    return;
+  }
+  const host = await ask("docker host (ssh target)", viewerHost(cfg));
+  const dir = await ask("install dir on that host", cfg.viewerDir || "/opt/catalog-viewer");
+  const dataDir = await ask("database data dir on that host", `${dir}/data/db`);
+  const network = await ask("docker network name (external, must exist)", "dockernet");
+  const catalogIp = await ask("fixed IP of the web page on that network");
+  const dbIp = await ask("fixed IP of the database on that network");
+  let p5Index = "";
+  try {
+    p5Index = `${configDir(cfg)}/index/backup`;
+  } catch {
+    p5Index = "";
+  }
+  p5Index = await ask("P5 backup index dir on the host (config/index/backup)", p5Index);
+  const packRoot = await ask("pack root on the host", cfg.packRoot);
+  const subpath = await ask("reverse-proxy sub-path (informational, empty = none)", "");
+  const o = { host, dir, dataDir, network, catalogIp, dbIp, p5Index, packRoot, subpath: subpath || undefined };
+  process.env.ARCHIWARE_CONFIG = file;
+  try {
+    console.error(JSON.stringify(await viewerDeploy(cfg, { ...o, confirm: false }), null, 2));
+    const go = (await ask("Deploy this now? [y/N]", "N")).trim().toLowerCase();
+    if (go !== "y" && go !== "yes") {
+      console.error("    not deployed");
+      return;
+    }
+    const r = await viewerDeploy(cfg, { ...o, confirm: true });
+    console.error(JSON.stringify(r, null, 2));
+  } catch (e) {
+    console.error(`    viewer deploy failed: ${(e as Error).message}`);
+  }
 }
 
 /** Absolute path of dist/index.js next to this module. */

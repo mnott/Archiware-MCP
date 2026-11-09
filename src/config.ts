@@ -90,8 +90,18 @@ export interface ArchiwareConfig {
   packRoot: string;
   /** The same directory as P5 sees it (docker mount point); "" = same as packRoot. Used to look tars up in P5's backup index. */
   packRootP5: string;
+  /** Host directory under which restores land by default: <restoreRoot>/<YYYYMMDD-HHMMSS>/<original absolute path>. Default <packRoot>/restore. */
+  restoreRoot: string;
+  /** Host paths (examples: a Seafile library path or mount) whose content is synced to other machines. A restore destination below one gets a warning; --to original below one is refused without --force-sync. */
+  syncRoots: string[];
   /** Assumed tar write throughput in MB/s for the pack time estimate. Default 150. */
   packMBps: number;
+  /** Minutes a cached slow P5 lookup (volume label/barcode/location, "which tape holds this tar") stays fresh in the catalogue table p5_cache; an expired entry is still served, marked stale, when P5 is unreachable. 0 = no cache. Default 60. */
+  cacheTtlMinutes: number;
+  /** Docker host of the catalogue viewer (ssh target; "" = the P5 host). Written by viewer_deploy. */
+  viewerHost: string;
+  /** Install dir of the viewer on that host (holds docker-compose.yaml, secrets/, dumps/). Written by viewer_deploy. */
+  viewerDir: string;
 }
 
 /**
@@ -130,7 +140,12 @@ export const DEFAULT_CONFIG: ArchiwareConfig = {
   catalogDbCnf: "/root/.mysql-catalog.cnf",
   packRoot: "/srv/archive/pack",
   packRootP5: "",
+  restoreRoot: "",
+  syncRoots: [],
   packMBps: 150,
+  cacheTtlMinutes: 60,
+  viewerHost: "",
+  viewerDir: "",
 };
 
 export function configPath(): string {
@@ -191,7 +206,12 @@ export function buildConfig(file: Partial<ArchiwareConfig>): ArchiwareConfig {
     catalogDbCnf: file.catalogDbCnf ?? DEFAULT_CONFIG.catalogDbCnf,
     packRoot: trimSlash(file.packRoot ?? DEFAULT_CONFIG.packRoot),
     packRootP5: trimSlash(file.packRootP5 ?? DEFAULT_CONFIG.packRootP5),
+    restoreRoot: trimSlash(file.restoreRoot || `${trimSlash(file.packRoot ?? DEFAULT_CONFIG.packRoot)}/restore`),
+    syncRoots: Array.isArray(file.syncRoots) ? file.syncRoots.map((p) => trimSlash(String(p))).filter(Boolean) : DEFAULT_CONFIG.syncRoots,
     packMBps: file.packMBps ?? DEFAULT_CONFIG.packMBps,
+    cacheTtlMinutes: file.cacheTtlMinutes ?? DEFAULT_CONFIG.cacheTtlMinutes,
+    viewerHost: file.viewerHost ?? DEFAULT_CONFIG.viewerHost,
+    viewerDir: trimSlash(file.viewerDir ?? DEFAULT_CONFIG.viewerDir),
   };
 }
 

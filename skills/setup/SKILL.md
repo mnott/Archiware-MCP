@@ -76,6 +76,17 @@ Setup checks prerequisites, detects the changer, writes `~/.config/archiware-mcp
 
 Tape drives (`element`, `gen`, `nst`, `p5`) cannot be guessed. If the user wants `tape_load`, `tape_erase` or `clean_drive`, help them add a `drives` array to the config (see the README).
 
+## 4b. Optional: catalogue viewer
+
+Only when the user packs data into tars (`pack`, `catalog_*`) and wants the read-only web page. Ask: **"Deploy the catalogue viewer (web page + its own database) on the docker host? [y/N]"**. `archiware setup` asks this itself in a terminal after the P5 connection; otherwise run it with the tool. On yes, ask one question at a time:
+
+1. **Docker host** (ssh target; default the P5 host in docker mode), **install dir** (default `/opt/catalog-viewer`) and **data dir** for the database files (default `<dir>/data/db`).
+2. **Docker network name** (existing, external; `ssh <host> docker network ls`) and **two free IPs on it**, one for the web page (`catalog`) and one for the database (`catalog-db`, port 3306). Suggest nothing from guesswork: `docker network inspect <net>` lists the used ones.
+3. **P5 backup index dir on the host** (`<P5 config>/index/backup`) and the **pack root on the host**.
+4. Optional **reverse-proxy sub-path** (informational: the result then contains an Apache example).
+
+Run `archiware viewer_deploy --network N --catalog-ip IP --db-ip IP [--host H] [--dir D] [--data-dir D] [--p5-index D] [--pack-root D] [--subpath S]` without `--yes`, show the plan, and only with the user's yes add `--yes` (or call the `viewer_deploy` tool with `confirm: true`). It generates all passwords itself, so nothing secret is typed or sent through chat; the **viewer password is printed once at the end**: tell the user to save it now. Then `archiware viewer_status` (containers healthy, database size, dump). Existing catalogue data in an old MySQL: `archiware catalog_migrate --from <host[:port]> --user U --password-file F` (plan first, then `--yes`). The page is reachable only over HTTPS for login (Secure cookie): the user has to put it behind their reverse proxy (`web/README.md`). Put `<dir>/dumps` into a P5 backup plan.
+
 ## 5. Verify
 
 ```

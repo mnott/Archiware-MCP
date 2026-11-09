@@ -1,3 +1,6 @@
+# Catalogue viewer: web page (catalog), its own database (catalog-db), daily dump (catalog-dump).
+# Site values come from ./.env (written by `archiware viewer_deploy`; see .env.example). The defaults below
+# are placeholders from the documentation ranges. Everything that must survive a rebuild lives on the host.
 services:
   catalog:
     build: .
@@ -6,20 +9,68 @@ services:
     hostname: catalog
     restart: unless-stopped
     read_only: true
+    user: "${CATALOG_UID:-1000}:${CATALOG_GID:-1000}"
     environment:
-      - TZ=Europe/Amsterdam
+      - TZ=${TZ:-UTC}
+    depends_on:
+      catalog-db:
+        condition: service_healthy
     volumes:
-      # everything that must survive a rebuild lives on the host; nothing is written inside the container
       - ./secrets:/secrets:ro
       - ./config:/config:ro
       # P5's backup index (read-only): which tape holds which tar
-      - /path/to/p5/config/index/backup:/p5index:ro
+      - ${P5_INDEX_DIR:-/path/to/p5/config/index/backup}:/p5index:ro
       # the pack root (read-only): "tar still on disk" check
-      - /path/to/pack-root:/packroot:ro
+      - ${PACK_ROOT:-/path/to/pack-root}:/packroot:ro
     networks:
       dockernet:
-        ipv4_address: 192.0.2.30
+        ipv4_address: ${CATALOG_IP:-192.0.2.30}
+
+  catalog-db:
+    image: mariadb:11.4 # LTS
+    container_name: catalog-db
+    hostname: catalog-db
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-UTC}
+      # passwords are read from files, never from this file
+      - MARIADB_ROOT_PASSWORD_FILE=/secrets/db_root_password
+    volumes:
+      - ./secrets:/secrets:ro
+      # the data lives on the host; nothing inside the container survives a rebuild
+      - ${DB_DATA_DIR:-./data/db}:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      dockernet:
+        # port 3306 is reachable on this address from the docker network and the docker host (the MCP connects here)
+        ipv4_address: ${CATALOG_DB_IP:-192.0.2.31}
+
+  # ponytail: a sleep loop instead of cron. Ceiling: after downtime there is no catch-up beyond the next loop (one dump at start, then one per night).
+  catalog-dump:
+    image: mariadb:11.4
+    container_name: catalog-dump
+    hostname: catalog-dump
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-UTC}
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+    volumes:
+      - ./secrets:/secrets:ro
+      - ./dump.sh:/dump.sh:ro
+      # logical dumps for the tape backup: put ./dumps (or the data dir) into a backup plan
+      - ./dumps:/dumps
+    command: ["bash", "/dump.sh"]
+    networks:
+      - dockernet
 
 networks:
   dockernet:
     external: true
+    name: ${DOCKER_NETWORK:-dockernet}

@@ -19,9 +19,15 @@ import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
 import * as tops from "./taskops.js";
 import * as cat from "./catalog.js";
+import * as idx from "./indexsync.js";
+import * as ff from "./findfile.js";
+import * as viewer from "./viewer.js";
 import { normalizeRestPath, restRequest, restResources } from "./rest.js";
 
 const cfg = loadConfig();
+const onConflictArg = z.enum(["refuse", "rename", "overwrite"]).optional().describe("What to do when a destination file exists: refuse (default), rename (<name>.restored-YYYYMMDD; not for P5 volume restores) or overwrite");
+const forceSyncArg = z.boolean().optional().describe("Allow to:'original' inside a configured syncRoot");
+const planIdArg = z.string().optional().describe("planId printed by the preview; required with confirm:true. A changed destination or new conflicts make the call refuse and show the new plan");
 if (missingKeys(cfg).length) console.error(`archiware-mcp: not configured (missing ${missingKeys(cfg).join(", ")}); run \`archiware setup\``);
 
 function text(data: unknown) {
@@ -313,20 +319,68 @@ server.registerTool(
   "restore",
   {
     description:
-      "Restores from a P5 BACKUP volume to an ALTERNATE directory (never overwrites originals) and returns the restore job id. Give `at` (a version `start` from restore_options) to use a copy of that version that is in the library, or `volume`. P5's CLI can only select a whole backup volume, so it refuses unless every entry on the volume is under `path`. May load a tape. Requires confirm:true; without it only the commands that WOULD run are returned.",
+      "Restore plan for ONE path at a chosen BACKUP version (`at` = a version `start` from restore_options). P5's CLI and REST cannot select a single path of a backup version (RestoreSelection addentry takes only archive handles; addfromvolume restores a whole volume), so this tool never starts a P5 job: it returns the full preview (source version, volume(s) with barcode and location, destination, bytes, free space, bounded tree, existing destination files, conflict policy, planId) and the exact P5 GUI steps (Restore > Backup > client > path > backup date > restore to the destination folder). confirm:true with the planId only creates the destination folder. Data comes from the catalogue copy of the backup index when the client is indexed, else P5's SQLite index. For archive entries use restore_archive; a whole volume is restore_volume.",
     inputSchema: {
-      volume: z.string().optional().describe("Backup volume id holding the data (see restore_lookup); omit when at is given"),
-      at: z.string().optional().describe("Version chosen from restore_options (its `start`, YYYY-MM-DD HH:MM): restores from a copy of that version that is in the library"),
-      path: z.string().describe("Original absolute folder path as backed up"),
-      target: z.string().describe("Separate absolute directory in the P5 container to restore into (created if missing)"),
-      confirm: z.boolean().optional().describe("Must be true to actually run"),
+      at: z.string().describe("Version chosen from restore_options (its `start`, YYYY-MM-DD HH:MM)"),
+      path: z.string().describe("Original absolute path (file or folder) as backed up"),
+      client: z.string().optional().describe("P5 client (default localhost)"),
+      to: z.string().optional().describe("Absolute directory in the P5 container; the original path is placed below it. Default: <restoreRoot>/<YYYYMMDD-HHMMSS>"),
+      onConflict: onConflictArg,
+      forceSync: forceSyncArg,
+      planId: planIdArg,
+      confirm: z.boolean().optional().describe("With planId: prepare the destination folder"),
     },
   },
-  async ({ volume, at, path, target, confirm }) => {
+  async ({ at, path, client, to, onConflict, forceSync, planId, confirm }) => {
     try {
-      if (at) return text(await lib.restoreVersion(cfg, at, path, target, Boolean(confirm)));
-      if (!volume) throw new Error("give volume or at");
-      return text(await ops.restore(cfg, volume, path, target, Boolean(confirm)));
+      return text(await lib.restoreVersion(cfg, at, path, { to, onConflict, forceSync, plan: planId, confirm: Boolean(confirm) }, client));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "restore_archive",
+  {
+    description:
+      "Restores ONE entry (file, or folder with everything below) of a P5 ARCHIVE index to an alternate directory: RestoreSelection create <client> <dir>, addentry <archive handle>, submit; returns the job id. Without confirm only the preview (read-back of the selection: entries and bytes from P5, free space, conflicts, policy, planId; the probe selection is destroyed, nothing submitted). confirm:true must pass that planId.",
+    inputSchema: {
+      path: z.string().describe("Absolute path of the entry as archived"),
+      index: z.string().optional().describe("Archive index (default Default-Archive)"),
+      to: z.string().optional().describe("Absolute directory in the P5 container; the original path is placed below it"),
+      onConflict: onConflictArg,
+      forceSync: forceSyncArg,
+      planId: planIdArg,
+      confirm: z.boolean().optional().describe("Must be true to actually run (with planId)"),
+    },
+  },
+  async ({ path, index, to, onConflict, forceSync, planId, confirm }) => {
+    try {
+      return text(await ops.restoreArchiveEntry(cfg, path, { to, onConflict, forceSync, plan: planId, confirm: Boolean(confirm) }, index));
+    } catch (e) {
+      return err(e);
+    }
+  },
+);
+
+server.registerTool(
+  "restore_volume",
+  {
+    description:
+      "EXPLICIT whole-volume restore: EVERYTHING on a P5 backup volume (all clients, all paths) goes to an alternate directory (RestoreSelection addfromvolume). Not for single files (use restore). Preview shows the volume, its used size, free space and a planId; confirm:true must pass that planId. Returns the job id.",
+    inputSchema: {
+      volume: z.string().describe("Backup volume id (see volumes / restore_lookup)"),
+      to: z.string().optional().describe("Absolute directory in the P5 container; default <restoreRoot>/<stamp>"),
+      onConflict: onConflictArg,
+      forceSync: forceSyncArg,
+      planId: planIdArg,
+      confirm: z.boolean().optional().describe("Must be true to actually run (with planId)"),
+    },
+  },
+  async ({ volume, to, onConflict, forceSync, planId, confirm }) => {
+    try {
+      return text(await ops.restoreVolume(cfg, volume, { to, onConflict, forceSync, plan: planId, confirm: Boolean(confirm) }));
     } catch (e) {
       return err(e);
     }
@@ -546,8 +600,15 @@ tool("pack", "Packs a source directory on the P5 host into tar files (D2D2T) and
 tool("pack_status", "Read-only. Progress of a detached pack: running or not, tars done/total, bytes, current tar, rate, ETA, last log lines.", { set: z.string() }, (a) => cat.packStatus(cfg, a.set));
 tool("pack_stop", "Stops a detached pack after the current tar (stop marker; finished tars stay, rerunning pack --detach resumes). Requires confirm:true.", { set: z.string(), confirm: confirmArg }, (a) => cat.packStop(cfg, a.set, Boolean(a.confirm)));
 tool("catalog_sets", "Read-only. Catalogue sets with tar count, file count, bytes and status.", {}, () => cat.catalogSets(cfg));
+tool("index_sync", "Copies P5's per-client backup index (read-only, immutable sqlite on the P5 host, P5 is not disturbed) into the catalogue database (tables names, dirs, p5_dirs, p5_files, index_state) so find_file can search names in seconds instead of the ~5 minute scan of P5's own 9.5 GB files.db. Paths are rebuilt set-based (one recursive query), rows stream in batches of 200000. Incremental by default: only new element ids plus versions that ended since the last run; a killed run resumes. full:true rescans everything. detach:true runs it on the host (use for the first, ~84 million row sync); index_status shows progress and rows/s. Writes only to the catalogue database.", { client: z.string().optional().describe("P5 client (default: every client with a backup index)"), full: z.boolean().optional(), detach: z.boolean().optional(), noDtime: z.boolean().optional().describe("skip re-reading rows for versions that ended since the last run (faster, deleted-file status lags until the next full pass)") }, (a) => idx.indexSync(cfg, { client: a.client, full: a.full, detach: a.detach, noDtime: a.noDtime }));
+tool("index_status", "Read-only. index_sync state per client (last element id and backup time read, rows), approximate table sizes, and detached runs (running/finished/failed, rows, rows/s, log tail).", {}, () => idx.indexStatus(cfg));
+tool("find_file", "Read-only. Searches file NAMES (substring, or glob with * ?; a pattern with / also matches the directory) across all backups: the P5 backup index copy (needs index_sync) and the tar catalogue. Returns every matching file (full path) with every version (distinct mtime+size, newest first); each version lists all places it can be fetched from, cheapest first: 1 disk-tar (inside a tar still on disk, no tape needed), 2 tape-library (P5 volume in the library) or tar-on-tape in library, 3 tape-offline (only on tapes outside the library: shows the barcode to insert). Same path+mtime+size from several sources is one version with several locations. Each version has a key and each location an id for restore_version.", { pattern: z.string(), limit: z.number().optional().describe("max files, default 20, max 200"), client: z.string().optional().describe("only this P5 client"), since: z.string().optional().describe("only versions modified on/after YYYY-MM-DD"), under: z.string().optional().describe("only below this directory (path prefix)") }, (a) => ff.findFile(cfg, a.pattern, { limit: a.limit, client: a.client, since: a.since, under: a.under }));
+tool("restore_version", "Restores ONE version found by find_file into a directory on the P5 host, from the cheapest place automatically (disk-tar: extracted from the tar; tape-library: P5 restore; tar on tape in library: tar restored to scratch then extracted) or from the location id given as 'from'. A version that is only on offline tapes is refused with 'insert <barcode>'. Without confirm only the PLAN: host, absolute destination, source location chosen (and alternatives), bytes, free space, tree preview and every destination file that already exists (size+mtime now vs restored), conflict policy and a planId. confirm:true must pass that planId; if the destination or conflicts changed it refuses and shows the new plan.", { path: z.string().describe("full path as find_file shows it"), version: z.string().describe("version key '<mtime>-<size>' from find_file"), to: z.string().optional().describe("Default: restore folder <restoreRoot>/<YYYYMMDD-HHMMSS>/<original path>. 'original' = original location (explicit choice; refused inside a syncRoot without forceSync). Any other absolute directory gets the original path placed below it"), onConflict: onConflictArg, forceSync: forceSyncArg, planId: planIdArg, from: z.string().optional().describe("location id from find_file instead of the cheapest"), client: z.string().optional(), confirm: confirmArg }, (a) => ff.restoreFileVersion(cfg, a.path, a.version, { to: a.to, onConflict: a.onConflict, forceSync: a.forceSync, plan: a.planId, from: a.from, client: a.client, confirm: Boolean(a.confirm) }));
 tool("catalog_search", "Read-only. Finds files in the catalogue by glob (* ?) or substring on path/basename. Per hit: set, path, size, mtime, tar name, whether the tar is still on disk, and where the tar is on tape (versions from P5's backup index: date, plan, volume label, barcode, location: library slot / mail slot / out of the house).", { pattern: z.string(), set: z.string().optional(), limit: z.number().optional().describe("Default 20, max 500") }, (a) => cat.catalogSearch(cfg, a.pattern, { set: a.set, limit: a.limit }));
-tool("catalog_restore", "Restores ONE file from a packed set into a directory on the P5 host: extracted from the tar when it is on disk; otherwise the tar is restored from tape (via restore, into a scratch dir under packRoot) and the member extracted, then the scratch tar is deleted. Refuses with a fetch list when the needed tape is not in the library. Requires confirm:true; without it only the plan.", { path: z.string().describe("File path inside the set (relative to the set's source root)"), set: z.string(), to: z.string().describe("Absolute target directory on the P5 host"), confirm: confirmArg }, (a) => cat.catalogRestore(cfg, a.path, { set: a.set, to: a.to, confirm: Boolean(a.confirm) }));
+tool("catalog_restore", "Restores ONE file from a packed set into a directory on the P5 host: extracted from the tar when it is on disk; otherwise the tar is restored from tape (via restore, into a scratch dir under packRoot) and the member extracted, then the scratch tar is deleted. Refuses with a fetch list when the needed tape is not in the library. Without confirm only the plan (destination, source, bytes, free space, existing destination files with size+mtime, conflict policy, planId); confirm:true needs that planId.", { path: z.string().describe("File path inside the set (relative to the set's source root)"), set: z.string(), to: z.string().optional().describe("Default: restore folder <restoreRoot>/<YYYYMMDD-HHMMSS>/<original path>; 'original' = original location; else a directory below which the original path is placed"), onConflict: onConflictArg, forceSync: forceSyncArg, planId: planIdArg, confirm: confirmArg }, (a) => cat.catalogRestore(cfg, a.path, { set: a.set, to: a.to, onConflict: a.onConflict, forceSync: a.forceSync, plan: a.planId, confirm: Boolean(a.confirm) }));
+tool("viewer_deploy", "Deploys the catalogue viewer on a docker host over ssh: a read-only web page, its own MariaDB (database archive_catalog, users catalog read/write for this MCP and catalog_ro SELECT-only for the page, data dir on the host) and a nightly dump service. Generates random passwords and the viewer login into <dir>/secrets (mode 600), copies web/, runs docker compose up -d --build, waits for health, runs catalog_init against the new database and points the MCP config (catalogMysqlContainer, catalogDbCnf) at it when the docker host is the P5 host. Without confirm: only the plan. With confirm:true the result contains the generated viewer password ONCE.", { host: z.string().optional().describe("Docker host (ssh target); default viewerHost or the P5 host"), dir: z.string().optional().describe("Install dir on the host (default /opt/catalog-viewer)"), dataDir: z.string().optional().describe("Database data dir on the host (default <dir>/data/db)"), network: z.string().describe("Existing external docker network name"), catalogIp: z.string().describe("Free IPv4 on that network for the web page"), dbIp: z.string().describe("Free IPv4 on that network for the database (port 3306)"), p5Index: z.string().optional().describe("P5 config/index/backup dir on the host (default derived from the config)"), packRoot: z.string().optional().describe("Pack root on the host (default config packRoot)"), subpath: z.string().optional().describe("Reverse-proxy sub-path, e.g. viewer (only adds an Apache example to the result)"), viewerUser: z.string().optional().describe("Viewer login name (default viewer)"), p5BaseUrl: z.string().optional().describe("Link target for 'P5 web UI' on the page"), tz: z.string().optional().describe("Time zone of the containers (default UTC)"), confirm: confirmArg }, (a) => viewer.viewerDeploy(cfg, { host: a.host, dir: a.dir, dataDir: a.dataDir, network: a.network, catalogIp: a.catalogIp, dbIp: a.dbIp, p5Index: a.p5Index, packRoot: a.packRoot, subpath: a.subpath, viewerUser: a.viewerUser, p5BaseUrl: a.p5BaseUrl, tz: a.tz, confirm: Boolean(a.confirm) }));
+tool("viewer_status", "Read-only. Catalogue viewer: containers (catalog, catalog-db, catalog-dump) with state and health, database size and row counts, newest dump file, number of cache entries (p5_cache) and the cache TTL.", {}, () => viewer.viewerStatus(cfg));
+tool("catalog_migrate", "Copies the catalogue database archive_catalog from an existing MySQL/MariaDB (host[:port], read-only on the source) into the viewer's catalog-db: mariadb-dump --single-transaction | mariadb inside the catalog-db container, then compares row counts of sets, tars, entries before/after. Refuses when the target already holds rows unless force:true. Without confirm: only the plan. The password file is read on the machine running the MCP.", { from: z.string().describe("Source host[:port]"), user: z.string(), passwordFile: z.string().describe("File with the source user's password (on this machine)"), force: z.boolean().optional(), sourceTls: z.enum(["verify", "skip-verify", "off"]).optional().describe("verify (default); skip-verify = encrypted but certificate not checked (MySQL 8 self-signed cert); off = no TLS"), confirm: confirmArg }, (a) => viewer.catalogMigrate(cfg, { from: a.from, user: a.user, passwordFile: a.passwordFile, force: a.force, sourceTls: a.sourceTls, confirm: Boolean(a.confirm) }));
 tool("catalog_drop", "Deletes a set's rows from the catalogue (not its tar files): for test sets and re-packs. Requires confirm:true.", { set: z.string(), confirm: confirmArg }, (a) => cat.catalogDrop(cfg, a.set, Boolean(a.confirm)));
 tool("library_plan", "Proposes the steps of a rearrangement (arrange), export or import and returns a persisted session id. Nothing moves until library_step. simulate:true walks the session on a virtual library without touching hardware.", { kind: z.enum(["arrange", "export", "import"]), tape: z.string().optional().describe("export: barcode or label"), mailSlot: z.number().optional(), simulate: z.boolean().optional() }, (a) => lib.libraryPlan(cfg, a.kind, { ref: a.tape, mailSlot: a.mailSlot }, Boolean(a.simulate)));
 tool("library_step", "Executes exactly one next step of a session (confirm-gated) and returns what happened plus the next instruction, including human steps (put/take a tape at the mail slot; those are verified, not executed). Re-checks busy state and slot contents first and stops if reality differs from the plan. The last step runs the P5 inventory and reconcile.", { session: z.string(), confirm: confirmArg, force: forceArg }, (a) => lib.libraryStep(cfg, a.session, Boolean(a.confirm), Boolean(a.force)));
@@ -618,16 +679,17 @@ server.registerTool(
   "tape_erase",
   {
     description:
-      "DESTRUCTIVE: short-erases tapes in the given slots (rewind + mt erase 0) — this DESTROYS all contents on them. One tape at a time, reported per slot; a bad tape reports an I/O error and is still rewound+unloaded. Requires confirm:true.",
+      "DESTRUCTIVE: short-erases tapes in the given slots (rewind + mt erase 0) — this DESTROYS all contents on them. One tape at a time, reported per slot; a bad tape reports an I/O error and is still rewound+unloaded. Refuses tapes P5 still knows as a volume (or whose barcode is unknown) unless eraseKnown:true; the preview lists them under `refused`. Requires confirm:true.",
     inputSchema: {
       slots: z.array(z.number()).describe("Slot numbers to erase, e.g. [14]"),
       confirm: z.boolean().optional().describe("Must be true to actually run"),
       force: z.boolean().optional().describe("Override the busy-library check"),
+      eraseKnown: z.boolean().optional().describe("Erase tapes P5 still knows as a volume (or with unknown barcode); default false = refuse"),
     },
   },
-  async ({ slots, confirm, force }) => {
+  async ({ slots, confirm, force, eraseKnown }) => {
     try {
-      return text(await tape.tapeErase(cfg, slots, Boolean(confirm), Boolean(force)));
+      return text(await tape.tapeErase(cfg, slots, Boolean(confirm), Boolean(force), Boolean(eraseKnown)));
     } catch (e) {
       return err(e);
     }

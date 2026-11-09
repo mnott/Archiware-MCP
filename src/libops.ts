@@ -8,6 +8,8 @@
  * `reconcile` compares it with mtx.
  */
 
+import { beginGuard, destOf, finishGuard, type Safety } from "./restoreguard.js";
+import { indexPreview } from "./restorepreview.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configPath, readConfigFile, type ArchiwareConfig } from "./config.js";
@@ -417,20 +419,22 @@ const localStamp = (sec: number) => {
  * is read directly and read-only (see p5db.ts for why nsdchat/REST cannot).
  * Never lists a volume inventory.
  */
-export async function restoreOptions(cfg: ArchiwareConfig, path: string, opts: { limit?: number; since?: string; client?: string } = {}) {
+export async function restoreOptions(cfg: ArchiwareConfig, path: string, opts: { limit?: number; since?: string; client?: string; light?: boolean } = {}) {
   const p = path.replace(/\/+$/, "") || "/";
   if (!p.startsWith("/")) throw new P5Error("path must be absolute (as P5 sees it)");
   const client = opts.client ?? "localhost";
   const since = opts.since ? Date.parse(`${opts.since}T00:00:00`) / 1000 : undefined;
   if (opts.since && !Number.isFinite(since)) throw new P5Error(`invalid since "${opts.since}", expected YYYY-MM-DD`);
   const found = await indexVersions(cfg, client, p, since);
-  const snap = await snapshot(cfg);
+  // light: only the volumes of the listed versions (restore of one version); full: every volume (fetch list)
+  const wanted = [...new Set(found.slice(0, opts.limit ?? 100).flatMap((v) => v.volumes))];
+  const snap = opts.light ? { mtx: ops.parseMtx(await mtxStatus(cfg)), vols: await ops.volumesByIds(cfg, wanted) } : await snapshot(cfg);
   const byId = new Map(snap.vols.map((v) => [v.id, v]));
   const planIds = [...new Set(found.map((v) => v.plan).filter((x): x is string => !!x))];
   const pd = planIds.length ? await nsdchatCalls(cfg, planIds.map((id) => ["BackupPlan", id, "describe"])) : [];
   const planName = new Map(planIds.map((id, i) => [id, pd[i]?.rc === 0 ? pd[i].out.trim() : id]));
   const poolOf = new Map<string, string | null>();
-  for (const pl of await ops.pools(cfg)) for (const v of pl.volumes) poolOf.set(v, pl.name);
+  if (!opts.light) for (const pl of await ops.pools(cfg)) for (const v of pl.volumes) poolOf.set(v, pl.name);
   const versions: RestoreVersion[] = found.slice(0, opts.limit ?? 100).map((v) => {
     const volumes = v.volumes.map((id) => {
       const vi = byId.get(id);
@@ -479,36 +483,67 @@ export async function offsiteFetchList(cfg: ArchiwareConfig, path: string) {
 }
 
 /**
- * Restore one chosen version (`at` = the start printed by restore_options,
- * "YYYY-MM-DD HH:MM", or its unix btime) of a path into a target directory.
- * P5's CLI can only submit a restore selection for a whole BACKUP volume
- * (addfromvolume); single entries of a backup index are not addressable
- * through nsdchat, and REST restore/restoreselections is undocumented. So the
- * confirmed run goes through `restore`, which refuses unless the chosen volume
- * holds nothing outside the path. Prefers a copy that is in the library.
+ * Restore one chosen version (`at` = the start printed by restore_options, "YYYY-MM-DD HH:MM", or its unix btime)
+ * of a path from a P5 BACKUP into a directory.
+ *
+ * P5's CLI (and REST) have no call that selects one path/version of a BACKUP index: RestoreSelection addentry
+ * takes only ARCHIVE entry handles, and the only backup-capable call, addfromvolume, restores the whole volume
+ * (volume inventories carry no handle for backup entries). So this never starts a P5 job: it returns the full
+ * preview (version, volumes with barcode and location, destination, bytes, free space, bounded tree, conflicts,
+ * policy, planId) plus the exact P5 GUI steps; a confirmed call with the planId prepares the destination folder.
+ * Preview data comes from the catalogue copy of the index when the client is indexed, else from P5's SQLite index.
  */
-export async function restoreVersion(cfg: ArchiwareConfig, at: string, path: string, target: string, confirm: boolean, client?: string) {
-  const opts = await restoreOptions(cfg, path, { client });
+export async function restoreVersion(cfg: ArchiwareConfig, at: string, path: string, safety: Safety, client?: string) {
+  path = path.replace(/\/+$/, "") || "/";
+  if (!path.startsWith("/")) throw new P5Error("path must be absolute");
+  if (safety.to === "original") throw new P5Error("restore into a folder (default) and move what you need; in-place P5 restores are not offered");
+  if (safety.onConflict === "rename") throw new P5Error("--on-conflict rename is not possible for a P5 restore; use refuse or overwrite");
+  const cl = client ?? "localhost";
+  const opts = await restoreOptions(cfg, path, { client: cl, light: true });
   const v = opts.versions.find((x) => x.start === at || String(x.btime) === at);
   if (!v) throw new P5Error(`no version "${at}" of ${path}; run restore_options first (starts: ${opts.versions.slice(0, 5).map((x) => x.start).join(", ") || "none"})`);
   if (v.volumes.length === 0) throw new P5Error(`version ${v.start} has no volume recorded`);
   const usable = v.volumes.filter((x) => x.where.where !== "offsite");
   if (usable.length === 0) throw new P5Error(`no copy of this version is in the library; fetch one of: ${v.volumes.map((x) => `${x.barcode ?? "(no barcode)"} ${x.label ?? ""} (volume ${x.id})`).join(", ")} and import it (tape_import), then retry`);
-  const vol = usable[0];
-  if (!confirm) {
-    const steps = [
-      ["RestoreSelection", "create", "localhost", target],
-      ["RestoreSelection", "<selection>", "addfromvolume", vol.id],
-      ["RestoreSelection", "<selection>", "describe", `restore ${path} (${v.start}) to ${target}`],
-      ["RestoreSelection", "<selection>", "submit"],
-    ];
-    return {
-      ...ops.wouldRunSteps(cfg, steps, `Restores the ${v.start} version (${v.level ?? "?"}) of ${path} from volume ${vol.label ?? vol.id} (${vol.barcode ?? "no barcode"}, ${vol.location}) into ${target}. The confirmed run first checks (long call) that the volume holds nothing outside ${path}, because P5 can only restore a whole backup volume, and refuses otherwise.`),
-      tape: { barcode: vol.barcode, location: vol.location },
-      copiesInLibrary: usable.length,
-    };
-  }
-  return ops.restore(cfg, vol.id, path, target, confirm);
+  const volText = (x: (typeof v.volumes)[number]) => `${x.label ?? x.id} (volume ${x.id}, barcode ${x.barcode ?? "none"}, ${x.location})`;
+  const source = `P5 backup of ${cl}, version ${v.start} (${v.level ?? "?"}); volume(s): ${v.volumes.map(volText).join(" | ")}`;
+  const g = beginGuard(cfg, safety, { p5: true });
+  const pv = await indexPreview(cfg, cl, path, v.btime);
+  const guard = await finishGuard(
+    cfg,
+    g,
+    {
+      sourceKey: `p5-backup:${cl}:${path}:${v.btime}`,
+      source,
+      inContainer: true,
+      files: pv.files.map((f) => ({ ...f, dest: destOf(g, f.dest) })),
+      totals: pv.totals,
+      notes: [
+        "P5 lays the restored tree out as <destination>/<original absolute path>",
+        `preview from ${pv.from === "catalog-db" ? "the catalogue copy of the P5 backup index" : "P5's backup index"} at the chosen version${pv.kind === "dir" ? " (direct entries of the folder; subfolders are not expanded)" : ""}`,
+      ],
+    },
+    safety,
+  );
+  const base = cfg.restUrl || "<P5 web address>";
+  const dest = g.base;
+  const manual = {
+    executedByTool: false,
+    why: "P5's CLI/REST cannot select one path of a backup version (RestoreSelection addentry needs an archive handle; addfromvolume would restore the whole volume). Nothing was started.",
+    p5: base,
+    steps: [
+      `open ${base} and sign in`,
+      `Restore > Backup: client ${cl}`,
+      `navigate to ${path}${pv.kind === "dir" ? " (select the folder)" : ""}`,
+      `pick the backup date ${v.start}`,
+      `restore to folder ${dest} (a relocate directory on the client; it must exist: re-run with --yes --plan <planId> to create it)`,
+      `keep the conflict policy: ${g.policy}`,
+    ],
+    volumesNeeded: v.volumes.map((x) => ({ volume: x.id, label: x.label, barcode: x.barcode, location: x.location })),
+  };
+  if (!guard.proceed) return { ...guard.preview, executed: false as const, manual };
+  await ops.containerExec(cfg, ["mkdir", "-p", dest]);
+  return { ...guard.preview, confirmationRequired: false as const, executed: false as const, destinationPrepared: dest, manual };
 }
 
 // ---------------------------------------------------------------------------

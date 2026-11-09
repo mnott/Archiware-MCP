@@ -13,8 +13,12 @@
 
 import { spawn } from "node:child_process";
 import type { ArchiwareConfig } from "./config.js";
+import { createHash } from "node:crypto";
 import { launch, nsdchat, P5Error, shellQuote } from "./transport.js";
+import { getOrFetch, SCHEMA_P5_CACHE, type CacheStore } from "./cache.js";
 import { restoreOptions, restoreVersion } from "./libops.js";
+import { beginGuard, destOf, finishGuard } from "./restoreguard.js";
+import { SCHEMA_INDEX } from "./indexschema.js";
 
 export type Progress = (msg: string) => void;
 const noProgress: Progress = () => undefined;
@@ -34,7 +38,7 @@ interface RunResult {
 }
 
 /** Run one shell string on the P5 host; optional stdin; streams stdout lines to onLine. */
-function runRemote(cfg: ArchiwareConfig, remote: string, opts: { input?: string; timeoutMs?: number; onLine?: (l: string) => void } = {}): Promise<RunResult> {
+export function runRemote(cfg: ArchiwareConfig, remote: string, opts: { input?: string; timeoutMs?: number; onLine?: (l: string) => void } = {}): Promise<RunResult> {
   const l = launch(cfg, remote);
   return new Promise((resolve, reject) => {
     const p = spawn(l.cmd, l.args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -72,19 +76,22 @@ function runRemote(cfg: ArchiwareConfig, remote: string, opts: { input?: string;
 }
 
 /** Run a bash script on the host with positional arguments (script travels as one quoted argument; stdin stays free). */
-function runScript(cfg: ArchiwareConfig, script: string, args: string[], opts: Parameters<typeof runRemote>[2] = {}) {
+export function runScript(cfg: ArchiwareConfig, script: string, args: string[], opts: Parameters<typeof runRemote>[2] = {}) {
   return runRemote(cfg, ["bash", "-c", script, "catalog", ...args].map(shellQuote).join(" "), opts);
 }
 
-const q = (s: string): string => `'${s.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+export const q = (s: string): string => `'${s.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
 
 function unescapeBatch(f: string): string {
   return f.replace(/\\([tn0\\])/g, (_, c: string) => (c === "t" ? "\t" : c === "n" ? "\n" : c === "0" ? "\0" : "\\"));
 }
 
+const CLIENT_SH = 'exec "$(command -v mariadb || command -v mysql)" "$@"';
+
 /** Run SQL in the catalogue database (batch mode, no header); rows of fields. The credentials file is redirected into the client only. */
 export async function sql(cfg: ArchiwareConfig, statement: string, timeoutMs = 300_000): Promise<string[][]> {
-  const remote = `docker exec -i ${shellQuote(cfg.catalogMysqlContainer)} mysql --defaults-extra-file=/dev/stdin --default-character-set=utf8mb4 -N -B ${CATALOG_DB} -e ${shellQuote(statement)} < ${shellQuote(cfg.catalogDbCnf)}`;
+  // the client is "mariadb" in the mariadb image (the viewer's catalog-db) and "mysql" in the mysql image
+  const remote = `docker exec -i ${shellQuote(cfg.catalogMysqlContainer)} sh -c ${shellQuote(CLIENT_SH)} sql --defaults-extra-file=/dev/stdin --default-character-set=utf8mb4 -N -B ${CATALOG_DB} -e ${shellQuote(statement)} < ${shellQuote(cfg.catalogDbCnf)}`;
   const r = await runRemote(cfg, remote, { timeoutMs });
   if (r.rc !== 0) throw new P5Error(`catalogue SQL failed (container ${cfg.catalogMysqlContainer}, credentials file ${cfg.catalogDbCnf}): ${r.stderr.split("\n").filter((x) => !/Using a password/.test(x))[0] ?? "unknown error"}`);
   const t = r.stdout.replace(/\n$/, "");
@@ -118,6 +125,7 @@ export const SCHEMA: string[] = [
   UNIQUE KEY uq_tars_set_name (set_id, name),
   CONSTRAINT fk_tars_set FOREIGN KEY (set_id) REFERENCES sets (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  SCHEMA_P5_CACHE,
   `CREATE TABLE IF NOT EXISTS entries (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   set_id INT UNSIGNED NOT NULL,
@@ -131,6 +139,7 @@ export const SCHEMA: string[] = [
   KEY ix_entries_tar (tar_id),
   CONSTRAINT fk_entries_tar FOREIGN KEY (tar_id) REFERENCES tars (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  ...SCHEMA_INDEX,
 ];
 
 /** Create the schema idempotently; returns the tables with column lists. */
@@ -440,7 +449,7 @@ files=$(wc -l < "$T.list" | tr -d ' ')
 } > "$T.sql"
 tmp="/tmp/catalog-$$.sql"
 docker cp "$T.sql" "$C:$tmp" >/dev/null || { echo "docker cp failed" >&2; exit 3; }
-docker exec -i "$C" mysql --defaults-extra-file=/dev/stdin --default-character-set=utf8mb4 "$DB" -e "source $tmp" < "$CNF" >/dev/null
+docker exec -i "$C" sh -c 'exec "$(command -v mariadb || command -v mysql)" "$@"' sql --defaults-extra-file=/dev/stdin --default-character-set=utf8mb4 "$DB" -e "source $tmp" < "$CNF" >/dev/null
 mrc=$?
 docker exec "$C" rm -f "$tmp"
 if [ "$mrc" -ne 0 ]; then echo "catalogue insert failed (mysql rc=$mrc); tar kept, rerun resumes" >&2; exit 4; fi
@@ -551,7 +560,7 @@ log "runner started: $TOTAL tars, pid $$"
 tar_one() (
 ${TAR_SCRIPT}
 )
-dbexec() { docker exec -i "$C" mysql --defaults-extra-file=/dev/stdin --default-character-set=utf8mb4 "$DB" -e "$1" < "$CNF" >/dev/null; }
+dbexec() { docker exec -i "$C" sh -c 'exec "$(command -v mariadb || command -v mysql)" "$@"' sql --defaults-extra-file=/dev/stdin --default-character-set=utf8mb4 "$DB" -e "$1" < "$CNF" >/dev/null; }
 while IFS=$'\\t' read -r IDX NAME FILES BYTES; do
   [ -n "$NAME" ] || continue
   if [ -f "$D/.stop" ]; then log "stopped on request before $NAME"; rm -f "$D/.current"; state stopped; dbexec "UPDATE sets SET status='stopped' WHERE id=$SID"; exit 0; fi
@@ -691,9 +700,9 @@ export function likeFor(pattern: string): { column: "path" | "basename"; like: s
   return { column: pattern.includes("/") || !glob ? "path" : "basename", like };
 }
 
-const p5Path = (cfg: ArchiwareConfig, hostPath: string): string => (cfg.packRootP5 && hostPath.startsWith(`${cfg.packRoot}/`) ? cfg.packRootP5 + hostPath.slice(cfg.packRoot.length) : hostPath);
+export const p5Path = (cfg: ArchiwareConfig, hostPath: string): string => (cfg.packRootP5 && hostPath.startsWith(`${cfg.packRoot}/`) ? cfg.packRootP5 + hostPath.slice(cfg.packRoot.length) : hostPath);
 
-async function filesExist(cfg: ArchiwareConfig, paths: string[]): Promise<Map<string, boolean>> {
+export async function filesExist(cfg: ArchiwareConfig, paths: string[]): Promise<Map<string, boolean>> {
   const m = new Map<string, boolean>();
   if (paths.length === 0) return m;
   const r = await runScript(cfg, 'for f in "$@"; do if [ -f "$f" ]; then echo 1; else echo 0; fi; done', paths);
@@ -701,16 +710,38 @@ async function filesExist(cfg: ArchiwareConfig, paths: string[]): Promise<Map<st
   return m;
 }
 
-/** Tape side of one tar: versions in P5's backup index with volume, barcode, location. */
-async function tapeInfo(cfg: ArchiwareConfig, tarPath: string) {
+/** Cache of slow P5 lookups in the catalogue table p5_cache (created on first use; any failure of the cache itself means "no cache"). */
+export function cacheStore(cfg: ArchiwareConfig): CacheStore | null {
+  if (!(cfg.cacheTtlMinutes > 0)) return null;
+  let ready: Promise<unknown> | null = null;
+  return {
+    async get(k) {
+      ready ??= sql(cfg, SCHEMA_P5_CACHE);
+      await ready;
+      const r = await sql(cfg, `SELECT TIMESTAMPDIFF(SECOND, fetched_at, NOW()), v FROM p5_cache WHERE k=${q(k)}`);
+      // batch output escapes tab/newline/backslash; sql() already undid that for the value column
+      return r[0] ? { ageS: Number(r[0][0]), v: r[0].slice(1).join("\t") } : null;
+    },
+    async put(k, v) {
+      await sql(cfg, `INSERT INTO p5_cache(k, v, fetched_at) VALUES (${q(k)}, ${q(v)}, NOW()) ON DUPLICATE KEY UPDATE v=VALUES(v), fetched_at=NOW()`);
+    },
+  };
+}
+
+/** Tape side of one tar: versions in P5's backup index with volume, barcode, location. Cached (cacheTtlMinutes); a stale entry is served, marked, when P5 is unreachable. */
+export async function tapeInfo(cfg: ArchiwareConfig, tarPath: string) {
+  const p = p5Path(cfg, tarPath);
   try {
-    const o = await restoreOptions(cfg, p5Path(cfg, tarPath), { limit: 5 });
-    return {
-      onTape: o.versions.length > 0,
-      available: o.versions.some((v) => v.available),
-      versions: o.versions.map((v) => ({ date: v.start, job: v.plan, event: v.event, level: v.level, volumes: v.volumes.map((x) => ({ label: x.label, barcode: x.barcode, location: x.location })) })),
-      fetchList: o.fetchList,
-    };
+    const r = await getOrFetch(cacheStore(cfg), cfg.cacheTtlMinutes, `mcp:tape:${createHash("sha1").update(p).digest("hex")}`, async () => {
+      const o = await restoreOptions(cfg, p, { limit: 5 });
+      return {
+        onTape: o.versions.length > 0,
+        available: o.versions.some((v) => v.available),
+        versions: o.versions.map((v) => ({ date: v.start, job: v.plan, event: v.event, level: v.level, volumes: v.volumes.map((x) => ({ label: x.label, barcode: x.barcode, location: x.location })) })),
+        fetchList: o.fetchList,
+      };
+    });
+    return r.cache === "stale" ? { ...r.value, stale: true, cachedMinutesAgo: Math.round((r.ageS ?? 0) / 60), note: `P5 unreachable (${r.error}); showing the cached answer` } : r.value;
   } catch (e) {
     return { onTape: false, available: false, versions: [], fetchList: [], error: (e as Error).message };
   }
@@ -748,24 +779,42 @@ async function lookup(cfg: ArchiwareConfig, set: string, path: string) {
   const rows = await sql(cfg, `SELECT e.path, e.size, e.mtime, t.name, t.path, t.sha256 FROM entries e JOIN tars t ON t.id=e.tar_id WHERE e.set_id=${setRow[0][0]} AND e.path=${q(rel)} AND BINARY e.path=BINARY ${q(rel)}`);
   const r = rows.find((x) => x[0] === rel);
   if (!r) throw new P5Error(`"${rel}" is not in set ${set} (path is relative to ${setRow[0][1]}); use catalog_search`);
-  return { rel, size: Number(r[1]), mtime: r[2], tar: r[3], tarPath: r[4], sha256: r[5] };
+  return { rel, root, size: Number(r[1]), mtime: r[2], tar: r[3], tarPath: r[4], sha256: r[5] };
 }
 
-const EXTRACT_SCRIPT = String.raw`
+export const EXTRACT_SCRIPT = String.raw`
 export LC_ALL=C
+policy="$4"; sfx="$5"
 mkdir -p "$3" || exit 2
-tar -C "$3" --no-wildcards -xf "$1" -- "$2" || exit 3
-f="$3/$2"
+dst="$3/$2"
+if [ -e "$dst" ] && [ "$policy" = refuse ]; then echo "destination exists" >&2; exit 5; fi
+if [ -e "$dst" ] && [ "$policy" = rename ]; then
+  tmp=$(mktemp -d "$3/.restore-tmp.XXXXXX") || exit 2
+  tar -C "$tmp" --no-wildcards -xf "$1" -- "$2" || { rm -rf "$tmp"; exit 3; }
+  [ -e "$dst$sfx" ] && { rm -rf "$tmp"; echo "$dst$sfx exists" >&2; exit 6; }
+  mv "$tmp/$2" "$dst$sfx" || { rm -rf "$tmp"; exit 7; }
+  rm -rf "$tmp"
+  f="$dst$sfx"
+else
+  tar -C "$3" --no-wildcards -xf "$1" -- "$2" || exit 3
+  f="$dst"
+fi
 [ -f "$f" ] || { echo "member not found after extraction" >&2; exit 4; }
-printf 'OK\t%s\t%s\n' "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+printf 'OK\t%s\t%s\t%s\n' "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)" "$f"
 `;
 
-export async function catalogRestore(cfg: ArchiwareConfig, path: string, opts: { set: string; to: string; confirm: boolean }, progress: Progress = noProgress) {
-  if (!opts.to.startsWith("/")) throw new P5Error("--to must be an absolute directory on the P5 host");
+export type CatalogRestoreOpts = { set: string; to?: string; confirm: boolean; onConflict?: string; forceSync?: boolean; plan?: string };
+
+export async function catalogRestore(cfg: ArchiwareConfig, path: string, opts: CatalogRestoreOpts, progress: Progress = noProgress) {
   const hit = await lookup(cfg, opts.set, path);
   const onDisk = (await filesExist(cfg, [hit.tarPath])).get(hit.tarPath) ?? false;
-  const dest = `${opts.to.replace(/\/+$/, "")}/${hit.rel}`;
-  const base = { set: opts.set, path: hit.rel, size: hit.size, tar: hit.tar, tarPath: hit.tarPath, tarOnDisk: onDisk, destination: dest };
+  const g = beginGuard(cfg, opts);
+  const rr = hit.root.replace(/^\/+|\/+$/g, "");
+  const origRoot = rr ? `/${rr}` : "";
+  const origAbs = `${origRoot}/${hit.rel}`;
+  const dest = destOf(g, origAbs);
+  const extractRoot = destOf(g, origRoot || "/");
+  const base = { set: opts.set, path: hit.rel, originalPath: origAbs, size: hit.size, tar: hit.tar, tarPath: hit.tarPath, tarOnDisk: onDisk, destination: dest };
   let tape: Awaited<ReturnType<typeof tapeInfo>> | undefined;
   let version: Awaited<ReturnType<typeof restoreOptions>>["versions"][number] | undefined;
   if (!onDisk) {
@@ -775,47 +824,22 @@ export async function catalogRestore(cfg: ArchiwareConfig, path: string, opts: {
     version = o.versions.find((v) => v.available);
     if (!version) throw new P5Error(`tar ${hit.tar} is not on disk and no tape holding it is in the library; fetch one of: ${JSON.stringify(o.fetchList)} and import it (tape_import), then retry`);
   }
-  if (!opts.confirm) {
-    return {
-      confirmationRequired: true as const,
-      ...base,
-      plan: onDisk
-        ? `extract ${hit.rel} from ${hit.tarPath} into ${opts.to}`
-        : `restore ${hit.tar} from tape (${version!.start}, ${version!.volumes.map((v) => `${v.label ?? v.id} ${v.barcode ?? ""} ${v.location}`).join(" | ")}) into a scratch dir below ${cfg.packRoot}/.restore, extract ${hit.rel} into ${opts.to}, delete the scratch tar`,
-      tape,
-    };
-  }
+  const source = onDisk
+    ? `disk-tar ${hit.tarPath}`
+    : `tape: tar ${hit.tar}, ${version!.volumes.map((v) => `volume ${v.label ?? v.id} barcode ${v.barcode ?? "?"} (${v.location})`).join(" | ")}, via scratch dir ${cfg.packRoot}/.restore`;
+  const guard = await finishGuard(cfg, g, { sourceKey: `${opts.set}:${hit.rel}:${hit.tar}:${hit.sha256}`, source, inContainer: false, files: [{ dest, size: hit.size, mtime: hit.mtime }] }, opts);
+  if (!guard.proceed) return { ...base, ...guard.preview, tape };
   if (onDisk) {
-    const r = await runScript(cfg, EXTRACT_SCRIPT, [hit.tarPath, hit.rel, opts.to]);
+    const r = await runScript(cfg, EXTRACT_SCRIPT, [hit.tarPath, hit.rel, extractRoot, g.policy, g.suffix]);
     if (r.rc !== 0) throw new P5Error(`extraction failed (exit ${r.rc}): ${r.stderr}`);
     const f = r.stdout.split("\n").find((l) => l.startsWith("OK\t"))!.split("\t");
-    return { confirmationRequired: false as const, ...base, source: "disk", extractedBytes: Number(f[1]), sha256: f[2] };
+    return { confirmationRequired: false as const, ...base, source: "disk", extractedBytes: Number(f[1]), sha256: f[2], writtenTo: f[3], conflictPolicy: g.policy };
   }
-  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-  const scratch = `${cfg.packRoot}/.restore/${opts.set}-${stamp}`;
-  const scratchP5 = cfg.packRootP5 ? `${cfg.packRootP5}/.restore/${opts.set}-${stamp}` : scratch;
-  progress(`restoring ${hit.tar} from tape into ${scratch}`);
-  const started = (await restoreVersion(cfg, version!.start, p5Path(cfg, hit.tarPath), scratchP5, true)) as { job?: string };
-  if (!started.job) throw new P5Error("P5 did not return a restore job id");
-  progress(`restore job ${started.job} submitted`);
-  const t0 = Date.now();
-  let status = "";
-  for (;;) {
-    status = (await nsdchat(cfg, ["Job", started.job, "status"])).trim();
-    if (!/^(running|scheduled|waiting|pending|active|queued)/i.test(status)) break;
-    if (Date.now() - t0 > cfg.longTimeoutMs * 6) throw new P5Error(`restore job ${started.job} still ${status} after ${dur((Date.now() - t0) / 1000)}; the scratch dir ${scratch} is left in place, rerun later`);
-    progress(`job ${started.job}: ${status} (${dur((Date.now() - t0) / 1000)})`);
-    await new Promise((r) => setTimeout(r, 15_000));
-  }
-  if (!/completed|finished|done|success/i.test(status)) throw new P5Error(`restore job ${started.job} ended with status "${status}"; scratch dir ${scratch} left for inspection`);
-  const find = await runRemote(cfg, ["find", scratch, "-name", hit.tar, "-type", "f"].map(shellQuote).join(" "));
-  const restored = find.stdout.split("\n").filter(Boolean)[0];
-  if (!restored) throw new P5Error(`job ${started.job} completed but ${hit.tar} is not below ${scratch}; scratch dir left in place`);
-  const r = await runScript(cfg, EXTRACT_SCRIPT, [restored, hit.rel, opts.to]);
-  if (r.rc !== 0) throw new P5Error(`extraction from the restored tar failed (exit ${r.rc}): ${r.stderr}; scratch dir ${scratch} left in place`);
-  const f = r.stdout.split("\n").find((l) => l.startsWith("OK\t"))!.split("\t");
-  if (scratch.startsWith(`${cfg.packRoot}/.restore/`)) await runRemote(cfg, ["rm", "-rf", scratch].map(shellQuote).join(" "));
-  return { confirmationRequired: false as const, ...base, source: "tape", job: started.job, extractedBytes: Number(f[1]), sha256: f[2], scratchRemoved: true };
+  // P5 cannot restore one path of a backup version through its CLI/REST, and a whole-volume restore is not
+  // done for a single tar: say what to do by hand instead of starting anything.
+  throw new P5Error(
+    `tar ${hit.tar} is only on tape (${source}). P5's CLI cannot restore a single path of a backup version; restore ${hit.tarPath} with the P5 GUI (Restore > Backup > client > navigate to the tar > pick the backup date) into a folder, put the tar back at ${hit.tarPath} (or any pack dir), then run catalog_restore again`,
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -22,6 +22,9 @@ import { restRequest, restResources, type RestMethod } from "./rest.js";
 import * as lib from "./libops.js";
 import * as gov from "./govops.js";
 import * as cat from "./catalog.js";
+import * as idx from "./indexsync.js";
+import * as ff from "./findfile.js";
+import * as viewer from "./viewer.js";
 import { P5Error } from "./transport.js";
 
 const USAGE = `archiware — manage an Archiware P5 server (docker, ssh or local mode)
@@ -47,8 +50,9 @@ Commands:
   label_tapes <jukebox> <pool> <slot...> [--drive <device>]
                          DESTRUCTIVE: label EMPTY tapes; --drive forces that drive (needs --yes)
   restore_lookup <volume|job> [--job]               list what a backup volume (or job's volumes) holds
-  restore <volume> <path> <target-dir>              restore a backed-up folder to an ALTERNATE dir (needs --yes)
-  restore --at "<start>" <path> <target-dir>        restore the version chosen from restore_options (needs --yes); refuses if no copy is in the library
+  restore --at "<start>" <path> [--to <dir>] [--client C]   plan for one path at the version chosen from restore_options: full preview + P5 GUI steps (P5 CLI cannot restore a single backup path); --yes --plan <id> prepares the folder
+  restore_archive <path> [--index I] [--to <dir>]   restore one ARCHIVE entry (RestoreSelection addentry); preview, then --yes --plan <id>
+  restore_volume <volume> [--to <dir>]              EXPLICIT whole-volume restore (everything on the volume); preview, then --yes --plan <id>
   add_plan_folder <plan> <path>                   add one folder as a new enabled task (needs --yes)
   add_plan_folders <plan> <path...> [--filter <f>]  add folders as enabled tasks (needs --yes)
   create_plan <name> [--retention <days>]         create a plan (needs --yes)
@@ -95,9 +99,17 @@ Commands:
   pack_status --set NAME   detached pack: tars done/total, bytes, current tar, rate, ETA, log tail
   pack_stop --set NAME     stop a detached pack after the current tar (needs --yes)
   catalog_sets           sets with tars, files, bytes, status
+  index_sync [--client C] [--full] [--detach] [--no-dtime]   copy P5's backup index (names, dirs, versions) into the catalogue db; incremental unless --full
+  index_status   index_sync state per client (last id/btime, rows), table sizes, detached runs with rows/s
+  find_file <name|glob> [--client C] [--since YYYY-MM-DD] [--under /path] [--limit N]   every backed-up version of every matching file, each with all places to fetch it from, cheapest first
+  restore_version <path> <versionKey> [--to original|<dir>] [--on-conflict refuse|rename|overwrite] [--force-sync] [--from <location id>] [--client C]   restore one version from its cheapest place; no --yes = preview with planId, then --yes --plan <id>
   catalog_search <pattern> [--set NAME] [--limit N]   find files (glob or substring) with tar, on-disk and tape location
-  catalog_restore <path> --set NAME --to <dir>   extract one file from its tar (from disk, else via tape restore) (needs --yes)
+  catalog_restore <path> --set NAME [--to original|<dir>] [--on-conflict ...]   extract one file from its tar (preview, then --yes --plan <id>)
   catalog_drop --set NAME                         delete a set's catalogue rows, not its tars (needs --yes)
+  viewer_deploy --network N --catalog-ip IP --db-ip IP [--host H] [--dir D] [--data-dir D] [--p5-index D] [--pack-root D] [--subpath S] [--viewer-user U] [--p5-base-url URL] [--tz Z]
+                         deploy the catalogue viewer (web page + its own MariaDB + nightly dump) on a docker host (plan without --yes)
+  viewer_status          viewer containers, health, database size, last dump, cache entries
+  catalog_migrate --from <host[:port]> --user U --password-file F [--source-tls verify|skip-verify|off] [--force]   copy archive_catalog from an existing MySQL into the viewer's database; F is read on THIS machine; skip-verify for a self-signed source cert (plan without --yes)
   health                 one-call P5 health check (exit code 1 on any fail; part of doctor)
   rest_resources         list the REST API resources
   rest <path> [--method GET|POST|PUT|DELETE] [--body <json>]
@@ -115,7 +127,7 @@ Options:
   --force  override the "library busy" check on tape_* / clean_drive
 `;
 
-const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", "job", "mail-slot", "at", "client", "days", "password-file", "server", "port", "tls", "sender", "user", "recipients", "set", "max", "into", "to", ...Object.keys(SETUP_FLAGS)]);
+const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", "job", "mail-slot", "at", "client", "days", "password-file", "server", "port", "tls", "sender", "user", "recipients", "set", "max", "into", "to", "on-conflict", "host", "dir", "data-dir", "network", "catalog-ip", "db-ip", "p5-index", "pack-root", "subpath", "viewer-user", "p5-base-url", "tz", "from", "source-tls", "under", ...Object.keys(SETUP_FLAGS)]);
 
 function parseArgs(argv: string[]) {
   const flags = new Set<string>();
@@ -130,6 +142,10 @@ function parseArgs(argv: string[]) {
     } else positional.push(a);
   }
   return { flags, values, positional };
+}
+
+function safetyOf(values: Map<string, string>, flags: Set<string>, confirm: boolean, to = values.get("to")) {
+  return { to, onConflict: values.get("on-conflict"), forceSync: flags.has("force-sync"), plan: values.get("plan"), confirm };
 }
 
 const cliProgress = (m: string) => console.error(`[progress] ${m}`);
@@ -151,12 +167,53 @@ function table(rows: Record<string, unknown>[], columns: string[]) {
   for (const row of cells) console.log(fmt(row));
 }
 
+/** Text form of a restore plan (finishGuard preview): every field, nothing dropped. */
+function printRestorePlan(d: Record<string, unknown>) {
+  const kb = (n: unknown) => (typeof n === "number" ? `${n} bytes (${(n / 1048576).toFixed(1)} MiB)` : "unknown");
+  console.log(`Restore plan ${d.planId}${d.executed === false ? " (the tool does not start a P5 job for this)" : ""}`);
+  console.log(`  source:       ${d.source}`);
+  console.log(`  host:         ${d.host}`);
+  console.log(`  destination:  ${d.destination} (${d.destinationMode})`);
+  console.log(`  bytes:        ${kb(d.bytesToWrite)}`);
+  console.log(`  free space:   ${kb(d.freeBytesAtDestination)}`);
+  console.log(`  entries:      ${d.entries}`);
+  console.log(`  policy:       ${d.conflictPolicy}`);
+  const c = d.conflicts as { count: number; first50: { path: string; current: { size: number; mtime: string }; restored: { size: number; mtime: string } }[]; more: number };
+  console.log(`  conflicts:    ${c.count}`);
+  for (const x of c.first50) console.log(`    ${x.path}: now ${x.current.size} bytes ${x.current.mtime}, restored ${x.restored.size} bytes ${x.restored.mtime}`);
+  if (c.more) console.log(`    ... ${c.more} more`);
+  console.log("  tree:");
+  for (const t of d.tree as string[]) console.log(`    ${t}`);
+  if ((d.treeMore as number) > 0) console.log(`    ... ${d.treeMore} more`);
+  for (const w of (d.warnings as string[]) ?? []) console.log(`  WARNING: ${w}`);
+  for (const n of (d.notes as string[] | undefined) ?? []) console.log(`  note: ${n}`);
+  const m = d.manual as { why: string; p5: string; steps: string[]; volumesNeeded: { volume: string; label: string | null; barcode: string | null; location: string | null }[] } | undefined;
+  if (m) {
+    console.log(`\n${m.why}`);
+    console.log("Volumes holding this version:");
+    for (const v of m.volumesNeeded) console.log(`  ${v.label ?? v.volume} (volume ${v.volume}) barcode ${v.barcode ?? "none"} - ${v.location}`);
+    console.log("Do in the P5 GUI:");
+    m.steps.forEach((x, i) => console.log(`  ${i + 1}. ${x}`));
+  }
+  if (Array.isArray(d.wouldRun)) {
+    console.log("Would run:");
+    for (const cmd of d.wouldRun as string[]) console.log(`  ${cmd}`);
+  }
+  if (typeof d.destinationPrepared === "string") console.log(`\nDestination folder created: ${d.destinationPrepared}`);
+  if (d.refused) console.log(`\nREFUSED: ${d.refused}`);
+  else if (d.confirmationRequired === true) console.log(`\n${d.next}\n  i.e. --yes --plan ${d.planId}`);
+}
+
 function printResult(name: string, data: unknown, json: boolean) {
   if (json) {
     printJson(data);
     return;
   }
   const d = data as Record<string, unknown>;
+  if (typeof d.planId === "string" && Array.isArray(d.tree)) {
+    printRestorePlan(d);
+    return;
+  }
   // Any mutation without --yes: print the exact commands that WOULD run.
   if (d.confirmationRequired === true && !Array.isArray(d.wouldRun)) {
     printJson(data);
@@ -467,15 +524,20 @@ async function main() {
       break;
     }
     case "restore": {
-      if (values.has("at")) {
-        const [path, target] = positional.slice(1);
-        if (!path || !target) throw new Error('usage: archiware restore --at "<YYYY-MM-DD HH:MM>" <path> <target-dir> --yes');
-        printResult("restore", await lib.restoreVersion(cfg, values.get("at")!, path, target, yes), json);
-        break;
-      }
-      const [volume, path, target] = positional.slice(1);
-      if (!volume || !path || !target) throw new Error("usage: archiware restore <volume> <path> <target-dir> --yes");
-      printResult("restore", await ops.restore(cfg, volume, path, target, yes), json);
+      const at = values.get("at");
+      const path = positional[1];
+      if (!at || !path) throw new Error('usage: archiware restore --at "<YYYY-MM-DD HH:MM>" <path> [--to <dir>] [--client C] [--on-conflict refuse|overwrite] [--plan <id>] [--yes]\n  (P5 cannot restore one path of a backup via CLI: this prints the plan and the P5 GUI steps; for a whole volume use restore_volume, for archive entries restore_archive)');
+      printResult("restore", await lib.restoreVersion(cfg, at, path, safetyOf(values, flags, yes, positional[2] ?? values.get("to")), values.get("client")), json);
+      break;
+    }
+    case "restore_volume": {
+      if (!positional[1]) throw new Error("usage: archiware restore_volume <volume> [--to <dir>] [--on-conflict refuse|overwrite] [--plan <id>] [--yes]   (restores EVERYTHING on the volume)");
+      printResult("restore", await ops.restoreVolume(cfg, positional[1], safetyOf(values, flags, yes, positional[2] ?? values.get("to"))), json);
+      break;
+    }
+    case "restore_archive": {
+      if (!positional[1]) throw new Error("usage: archiware restore_archive <path> [--index Default-Archive] [--to <dir>] [--on-conflict refuse|overwrite] [--plan <id>] [--yes]");
+      printResult("restore", await ops.restoreArchiveEntry(cfg, positional[1], safetyOf(values, flags, yes, positional[2] ?? values.get("to")), values.get("index")), json);
       break;
     }
     case "governance_report":
@@ -509,6 +571,17 @@ async function main() {
     case "catalog_init":
       printResult("catalog_init", await cat.catalogInit(cfg), json);
       break;
+    case "viewer_deploy":
+      printResult("viewer_deploy", await viewer.viewerDeploy(cfg, { host: values.get("host"), dir: values.get("dir"), dataDir: values.get("data-dir"), network: values.get("network"), catalogIp: values.get("catalog-ip"), dbIp: values.get("db-ip"), p5Index: values.get("p5-index"), packRoot: values.get("pack-root"), subpath: values.get("subpath"), viewerUser: values.get("viewer-user"), p5BaseUrl: values.get("p5-base-url"), tz: values.get("tz"), confirm: yes }), json);
+      break;
+    case "viewer_status":
+      printResult("viewer_status", await viewer.viewerStatus(cfg), json);
+      break;
+    case "catalog_migrate": {
+      if (!values.get("from") || !values.get("user") || !values.get("password-file")) throw new Error("usage: archiware catalog_migrate --from <host[:port]> --user U --password-file F [--source-tls verify|skip-verify|off] [--force] [--yes]");
+      printResult("catalog_migrate", await viewer.catalogMigrate(cfg, { from: values.get("from")!, user: values.get("user")!, passwordFile: values.get("password-file")!, confirm: yes, force: flags.has("force"), sourceTls: values.get("source-tls") as "verify" | "skip-verify" | "off" | undefined }), json);
+      break;
+    }
     case "pack": {
       if (!positional[1] || !values.get("set")) throw new Error("usage: archiware pack <source dir> --set NAME [--max 50G] [--into <pack root>] [--yes]");
       printResult("pack", await cat.pack(cfg, positional[1], { set: values.get("set")!, max: values.get("max"), into: values.get("into"), confirm: yes, replan: flags.has("replan"), detach: flags.has("detach") }, cliProgress), json);
@@ -525,14 +598,30 @@ async function main() {
     case "catalog_sets":
       printResult("catalog_sets", await cat.catalogSets(cfg), json);
       break;
+    case "index_sync":
+      printResult("index_sync", await idx.indexSync(cfg, { client: values.get("client"), full: flags.has("full"), detach: flags.has("detach"), noDtime: flags.has("no-dtime") }, cliProgress), json);
+      break;
+    case "index_status":
+      printResult("index_status", await idx.indexStatus(cfg), json);
+      break;
+    case "find_file": {
+      if (!positional[1]) throw new Error("usage: archiware find_file <name|glob> [--client C] [--since YYYY-MM-DD] [--under /path] [--limit N]");
+      printResult("find_file", await ff.findFile(cfg, positional[1], { client: values.get("client"), since: values.get("since"), under: values.get("under"), limit: values.has("limit") ? Number(values.get("limit")) : undefined }), json);
+      break;
+    }
+    case "restore_version": {
+      if (!positional[1] || !positional[2]) throw new Error("usage: archiware restore_version <path> <versionKey: mtime-size> [--to original|<dir>] [--on-conflict refuse|rename|overwrite] [--plan <id>] [--force-sync] [--from <location id>] [--client C] [--yes]");
+      printResult("restore_version", await ff.restoreFileVersion(cfg, positional[1], positional[2], { ...safetyOf(values, flags, yes), from: values.get("from"), client: values.get("client") }), json);
+      break;
+    }
     case "catalog_search": {
       if (!positional[1]) throw new Error("usage: archiware catalog_search <pattern> [--set NAME] [--limit N]");
       printResult("catalog_search", await cat.catalogSearch(cfg, positional[1], { set: values.get("set"), limit: values.has("limit") ? Number(values.get("limit")) : undefined }), json);
       break;
     }
     case "catalog_restore": {
-      if (!positional[1] || !values.get("set") || !values.get("to")) throw new Error("usage: archiware catalog_restore <path> --set NAME --to <dir> [--yes]");
-      printResult("catalog_restore", await cat.catalogRestore(cfg, positional[1], { set: values.get("set")!, to: values.get("to")!, confirm: yes }, cliProgress), json);
+      if (!positional[1] || !values.get("set")) throw new Error("usage: archiware catalog_restore <path> --set NAME [--to original|<dir>] [--on-conflict refuse|rename|overwrite] [--plan <id>] [--force-sync] [--yes]");
+      printResult("catalog_restore", await cat.catalogRestore(cfg, positional[1], { ...safetyOf(values, flags, yes), set: values.get("set")! }, cliProgress), json);
       break;
     }
     case "catalog_drop": {
@@ -751,8 +840,8 @@ async function main() {
     }
     case "tape_erase": {
       const slots = positional.slice(1).map(Number);
-      if (slots.length === 0 || slots.some((s) => !Number.isInteger(s))) throw new Error("usage: archiware tape_erase <slot...> --yes");
-      printResult("tape_erase", await tape.tapeErase(cfg, slots, yes, flags.has("force")), json);
+      if (slots.length === 0 || slots.some((s) => !Number.isInteger(s))) throw new Error("usage: archiware tape_erase <slot...> [--erase-known] --yes");
+      printResult("tape_erase", await tape.tapeErase(cfg, slots, yes, flags.has("force"), flags.has("erase-known")), json);
       break;
     }
     case "clean_drive": {
