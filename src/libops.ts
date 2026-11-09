@@ -14,7 +14,7 @@ import { configPath, readConfigFile, type ArchiwareConfig } from "./config.js";
 import { hostCommand, mtxStatus, nsdchat, nsdchatCalls, P5Error, parseTclList, describeRemote, shellQuote } from "./transport.js";
 import * as ops from "./operations.js";
 import { guardBusy } from "./tapeops.js";
-import { jobHistory } from "./taskops.js";
+import { indexVersions } from "./p5db.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -388,86 +388,88 @@ export function parseSource(source: string | null): { level: string; root: strin
   return m ? { level: m[1], root: m[2].replace(/\/+$/, "") || "/", pool: m[3] ?? null } : null;
 }
 
-const covers = (root: string, path: string) => path === root || path.startsWith(root === "/" ? "/" : root + "/") || root.startsWith(path === "/" ? "/" : path + "/");
-
 export interface RestoreVersion {
-  job: string;
-  start: string | null;
+  /** backup time, server-local "YYYY-MM-DD HH:MM" */
+  start: string;
+  btime: number;
+  mtime: string | null;
+  type: string;
+  sizeBytes: number;
   plan: string | null;
-  level: string;
-  root: string;
-  pool: string | null;
-  sizeKb: number;
-  files: number;
-  volumes: { id: string; label: string | null; barcode: string | null; where: Where; location: string }[];
+  event: string | null;
+  level: string | null;
+  /** Volumes holding a copy of this version (any one is enough to restore it). */
+  volumes: { id: string; label: string | null; barcode: string | null; pool: string | null; where: Where; location: string }[];
+  /** true when at least one copy is in the library (slot, drive or mail slot). */
   available: boolean;
 }
 
-/** job id -> volume ids, from `Volume <id> jobs` (cheap attribute read). */
-async function jobVolumeMap(cfg: ArchiwareConfig, vols: ops.VolumeInfo[]): Promise<Map<string, string[]>> {
-  const res = await nsdchatCalls(cfg, vols.map((v) => ["Volume", v.id, "jobs"]));
-  const m = new Map<string, string[]>();
-  vols.forEach((v, i) => {
-    if (res[i]?.rc !== 0) return;
-    for (const j of parseTclList(res[i].out.trim())) m.set(j, [...(m.get(j) ?? []), v.id]);
-  });
-  return m;
-}
+const localStamp = (sec: number) => {
+  const d = new Date(sec * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 
 /**
- * Every backed-up version of a file or folder: the backup jobs whose saved root
- * contains the path (or lies inside it), with the volume(s) each job wrote to,
- * and where each tape is now. P5's CLI cannot search a backup index per path
- * (findentry needs archive handles), so this uses the job protocols' roots plus
- * the volume -> jobs relation; it never dumps a volume inventory.
+ * Every backed-up version of a file or folder, from the client's backup index
+ * (P5 keeps one per client: <config>/index/backup/bsx_<client>), with the
+ * volume copies that hold each version and where each tape is now. The index
+ * is read directly and read-only (see p5db.ts for why nsdchat/REST cannot).
+ * Never lists a volume inventory.
  */
-export async function restoreOptions(cfg: ArchiwareConfig, path: string, opts: { limit?: number; since?: string } = {}) {
+export async function restoreOptions(cfg: ArchiwareConfig, path: string, opts: { limit?: number; since?: string; client?: string } = {}) {
   const p = path.replace(/\/+$/, "") || "/";
   if (!p.startsWith("/")) throw new P5Error("path must be absolute (as P5 sees it)");
-  const hist = (await jobHistory(cfg, { limit: opts.limit ?? 1500, since: opts.since, status: "completed", maxScan: 3000 })) as unknown as { jobs?: Record<string, unknown>[] } | Record<string, unknown>[];
-  const rows = (Array.isArray(hist) ? hist : hist.jobs ?? []) as Record<string, unknown>[];
+  const client = opts.client ?? "localhost";
+  const since = opts.since ? Date.parse(`${opts.since}T00:00:00`) / 1000 : undefined;
+  if (opts.since && !Number.isFinite(since)) throw new P5Error(`invalid since "${opts.since}", expected YYYY-MM-DD`);
+  const found = await indexVersions(cfg, client, p, since);
   const snap = await snapshot(cfg);
-  const jv = await jobVolumeMap(cfg, snap.vols.filter((v) => /tape|container/i.test(v.mediatype ?? "tape")));
   const byId = new Map(snap.vols.map((v) => [v.id, v]));
-  const versions: RestoreVersion[] = [];
-  for (const r of rows) {
-    const src = parseSource(String(r.source ?? ""));
-    if (!src || !covers(src.root, p)) continue;
-    if (!(Number(r.files) > 0) || !/success|warning/.test(String(r.completion))) continue;
-    const vids = jv.get(String(r.id)) ?? [];
-    const volumes = vids.map((id) => {
-      const v = byId.get(id)!;
-      const w = locate(cfg, snap.mtx, v.barcode);
-      return { id, label: v.label, barcode: v.barcode, where: w, location: whereText(w) };
+  const planIds = [...new Set(found.map((v) => v.plan).filter((x): x is string => !!x))];
+  const pd = planIds.length ? await nsdchatCalls(cfg, planIds.map((id) => ["BackupPlan", id, "describe"])) : [];
+  const planName = new Map(planIds.map((id, i) => [id, pd[i]?.rc === 0 ? pd[i].out.trim() : id]));
+  const poolOf = new Map<string, string | null>();
+  for (const pl of await ops.pools(cfg)) for (const v of pl.volumes) poolOf.set(v, pl.name);
+  const versions: RestoreVersion[] = found.slice(0, opts.limit ?? 100).map((v) => {
+    const volumes = v.volumes.map((id) => {
+      const vi = byId.get(id);
+      const w = locate(cfg, snap.mtx, vi?.barcode ?? null);
+      return { id, label: vi?.label ?? null, barcode: vi?.barcode ?? null, pool: poolOf.get(id) ?? null, where: w, location: vi ? whereText(w) : "volume unknown to P5 (recycled?)" };
     });
-    versions.push({
-      job: String(r.id),
-      start: (r.start as string) ?? null,
-      plan: String(r.plan ?? ""),
-      level: src.level,
-      root: src.root,
-      pool: src.pool,
-      sizeKb: Number(r.size_kb) || 0,
-      files: Number(r.files) || 0,
+    return {
+      start: localStamp(v.btime),
+      btime: v.btime,
+      mtime: v.mtime ? localStamp(v.mtime) : null,
+      type: v.type,
+      sizeBytes: v.size,
+      plan: v.plan ? (planName.get(v.plan) ?? v.plan) : null,
+      event: v.event,
+      level: v.level === null ? null : v.level === 1 ? "full" : "incremental",
       volumes,
-      available: volumes.length > 0 && volumes.every((v) => v.where.where !== "offsite"),
-    });
-  }
-  versions.sort((a, b) => (b.start ?? "").localeCompare(a.start ?? "") || Number(b.job) - Number(a.job));
-  return { path: p, versions, fetchList: fetchList(versions), note: "A version is a backup job whose saved root contains the path; presence of the file inside it is not verified (P5 CLI has no per-path backup index search)." };
+      available: volumes.some((x) => byId.has(x.id) && x.where.where !== "offsite"),
+    };
+  });
+  return {
+    path: p,
+    client,
+    versions,
+    fetchList: fetchList(versions),
+    note: "Versions come from P5's backup index of the client (read-only). Each version lists every volume holding a copy; one copy in the library is enough. A folder's versions are the runs that saved the folder entry itself; its files have their own versions.",
+  };
 }
 
-/** Tapes of the given versions that are not in the library. */
+/** Tapes still to fetch: for every version with no copy in the library, its first copy. */
 export function fetchList(versions: RestoreVersion[]) {
-  const m = new Map<string, { barcode: string | null; label: string | null; volume: string; jobs: string[] }>();
-  for (const v of versions)
-    for (const vol of v.volumes)
-      if (vol.where.where === "offsite") {
-        const k = vol.barcode ?? vol.id;
-        const e = m.get(k) ?? { barcode: vol.barcode, label: vol.label, volume: vol.id, jobs: [] };
-        e.jobs.push(v.job);
-        m.set(k, e);
-      }
+  const m = new Map<string, { barcode: string | null; label: string | null; volume: string; versions: string[] }>();
+  for (const v of versions) {
+    if (v.available || v.volumes.length === 0) continue;
+    const vol = v.volumes[0];
+    const k = vol.barcode ?? vol.id;
+    const e = m.get(k) ?? { barcode: vol.barcode, label: vol.label, volume: vol.id, versions: [] };
+    e.versions.push(v.start);
+    m.set(k, e);
+  }
   return [...m.values()];
 }
 
@@ -477,29 +479,34 @@ export async function offsiteFetchList(cfg: ArchiwareConfig, path: string) {
 }
 
 /**
- * Restore a chosen version (job from restore_options) into a target directory.
- * Refuses when a needed tape is not in the library and says which one to fetch.
+ * Restore one chosen version (`at` = the start printed by restore_options,
+ * "YYYY-MM-DD HH:MM", or its unix btime) of a path into a target directory.
+ * P5's CLI can only submit a restore selection for a whole BACKUP volume
+ * (addfromvolume); single entries of a backup index are not addressable
+ * through nsdchat, and REST restore/restoreselections is undocumented. So the
+ * confirmed run goes through `restore`, which refuses unless the chosen volume
+ * holds nothing outside the path. Prefers a copy that is in the library.
  */
-export async function restoreVersion(cfg: ArchiwareConfig, job: string, path: string, target: string, confirm: boolean) {
-  if (!/^\d+$/.test(job)) throw new P5Error("job must be a numeric id");
-  const opts = await restoreOptions(cfg, path);
-  const v = opts.versions.find((x) => x.job === job);
-  if (!v) throw new P5Error(`job ${job} is not a known backup version of ${path}; run restore_options first`);
-  if (v.volumes.length === 0) throw new P5Error(`job ${job} has no volume recorded`);
-  const missing = v.volumes.filter((x) => x.where.where === "offsite");
-  if (missing.length > 0) throw new P5Error(`needed tape(s) not in the library: ${missing.map((x) => `${x.barcode ?? "(no barcode)"} ${x.label ?? ""} (volume ${x.id})`).join(", ")} — fetch and import them (tape_import), then retry`);
-  if (v.volumes.length > 1) throw new P5Error(`job ${job} spans ${v.volumes.length} volumes; the CLI restores one volume at a time, refusing`);
-  const vol = v.volumes[0];
+export async function restoreVersion(cfg: ArchiwareConfig, at: string, path: string, target: string, confirm: boolean, client?: string) {
+  const opts = await restoreOptions(cfg, path, { client });
+  const v = opts.versions.find((x) => x.start === at || String(x.btime) === at);
+  if (!v) throw new P5Error(`no version "${at}" of ${path}; run restore_options first (starts: ${opts.versions.slice(0, 5).map((x) => x.start).join(", ") || "none"})`);
+  if (v.volumes.length === 0) throw new P5Error(`version ${v.start} has no volume recorded`);
+  const usable = v.volumes.filter((x) => x.where.where !== "offsite");
+  if (usable.length === 0) throw new P5Error(`no copy of this version is in the library; fetch one of: ${v.volumes.map((x) => `${x.barcode ?? "(no barcode)"} ${x.label ?? ""} (volume ${x.id})`).join(", ")} and import it (tape_import), then retry`);
+  const vol = usable[0];
   if (!confirm) {
-    // The real run first lists the volume's contents (a long nsdchat call, minutes on big volumes): the dry plan does not.
     const steps = [
-      ["Volume", vol.id, "inventory", "<file>", "handle", "size", "volumes"],
       ["RestoreSelection", "create", "localhost", target],
       ["RestoreSelection", "<selection>", "addfromvolume", vol.id],
-      ["RestoreSelection", "<selection>", "describe", `restore ${path} to ${target}`],
+      ["RestoreSelection", "<selection>", "describe", `restore ${path} (${v.start}) to ${target}`],
       ["RestoreSelection", "<selection>", "submit"],
     ];
-    return { ...ops.wouldRunSteps(cfg, steps, `Restores job ${job} (${v.start ?? "?"}, ${v.level}) of ${path} from volume ${vol.label ?? vol.id} (${vol.barcode ?? "no barcode"}, ${vol.location}) into ${target}. The confirmed run first checks that the volume holds nothing outside ${path} (P5 can only restore a whole backup volume) and refuses otherwise.`), tape: { barcode: vol.barcode, location: vol.location } };
+    return {
+      ...ops.wouldRunSteps(cfg, steps, `Restores the ${v.start} version (${v.level ?? "?"}) of ${path} from volume ${vol.label ?? vol.id} (${vol.barcode ?? "no barcode"}, ${vol.location}) into ${target}. The confirmed run first checks (long call) that the volume holds nothing outside ${path}, because P5 can only restore a whole backup volume, and refuses otherwise.`),
+      tape: { barcode: vol.barcode, location: vol.location },
+      copiesInLibrary: usable.length,
+    };
   }
   return ops.restore(cfg, vol.id, path, target, confirm);
 }

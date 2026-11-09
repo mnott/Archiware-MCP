@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed `restore_options` / `restore`: versions now come from P5's per-client backup index (read-only, via sqlite3 on the host) instead of job roots, so a path's real versions with every volume copy are listed; `restore --at "<start>"` replaces `--job`. P5's nsdchat/REST cannot put a single backup entry into a restore selection (documented in the README).
+- New `governance_report`, `governance_apply`, `schedule_check`, `ensure_done` (with `--rerun`, `--mail`), `notify_status`, `notify_set`, `notify_test`; `doctor`/`health` get a `mail` silence check; new config keys `operatorMail`, `mailSilenceDays`, `governanceMonths`, `disabledDays`, `p5ConfigDir`.
+- Restart guard now also counts waiting jobs.
+
 - New config keys `slotLayout` (pool -> slot range/list), `mailSlots`, `longTimeoutMs`, `lockWaitS`.
 - New `library_layout`, `library_arrange`: slot layout per pool with ok/misplaced/foreign/empty status, and the minimal confirm-gated `mtx transfer` plan (refused while a drive is loaded or a job runs).
 - New `tape_export` / `tape_import`: move a tape to and from the mail slot, confirm-gated, with a P5 inventory after.

@@ -34,6 +34,7 @@ const HEALTH_FIX: Record<string, string> = {
   drives: "run `archiware status`; check the drive/changer cabling",
   cleaning: "clean the drive: `archiware clean_drive <p5 device> --yes`",
   log: "check `logPath` in the config (host path of lexxsrv.log)",
+  mail: "run `archiware notify_status`; fix the SMTP settings in the P5 GUI (Setup > Mail), then `archiware notify_test`; ensure_done --mail reports independently",
 };
 
 export function nodeMajor(version = process.versions.node): number {

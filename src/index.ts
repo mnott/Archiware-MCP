@@ -14,6 +14,7 @@ import { VERSION } from "./version.js";
 import * as ops from "./operations.js";
 import * as tape from "./tapeops.js";
 import * as lib from "./libops.js";
+import * as gov from "./govops.js";
 import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
 import * as tops from "./taskops.js";
@@ -311,19 +312,19 @@ server.registerTool(
   "restore",
   {
     description:
-      "Restores a folder from a P5 BACKUP volume to an ALTERNATE directory (never overwrites originals) and returns the restore job id. P5's CLI can only select a whole backup volume, so it refuses unless every entry on the volume is under `path`. May load a tape. Requires confirm:true; without it only the commands that WOULD run are returned.",
+      "Restores from a P5 BACKUP volume to an ALTERNATE directory (never overwrites originals) and returns the restore job id. Give `at` (a version `start` from restore_options) to use a copy of that version that is in the library, or `volume`. P5's CLI can only select a whole backup volume, so it refuses unless every entry on the volume is under `path`. May load a tape. Requires confirm:true; without it only the commands that WOULD run are returned.",
     inputSchema: {
-      volume: z.string().optional().describe("Backup volume id holding the data (see restore_lookup); omit when job is given"),
-      job: z.string().optional().describe("Version chosen from restore_options (backup job id); refuses if its tape is not in the library"),
+      volume: z.string().optional().describe("Backup volume id holding the data (see restore_lookup); omit when at is given"),
+      at: z.string().optional().describe("Version chosen from restore_options (its `start`, YYYY-MM-DD HH:MM): restores from a copy of that version that is in the library"),
       path: z.string().describe("Original absolute folder path as backed up"),
       target: z.string().describe("Separate absolute directory in the P5 container to restore into (created if missing)"),
       confirm: z.boolean().optional().describe("Must be true to actually run"),
     },
   },
-  async ({ volume, job, path, target, confirm }) => {
+  async ({ volume, at, path, target, confirm }) => {
     try {
-      if (job) return text(await lib.restoreVersion(cfg, job, path, target, Boolean(confirm)));
-      if (!volume) throw new Error("give volume or job");
+      if (at) return text(await lib.restoreVersion(cfg, at, path, target, Boolean(confirm)));
+      if (!volume) throw new Error("give volume or at");
       return text(await ops.restore(cfg, volume, path, target, Boolean(confirm)));
     } catch (e) {
       return err(e);
@@ -522,11 +523,18 @@ const tool = (name: string, description: string, inputSchema: Record<string, z.Z
 const confirmArg = z.boolean().optional().describe("Must be true to actually run; without it only the plan/commands are returned");
 const forceArg = z.boolean().optional().describe("Override the busy-library check");
 
+tool("governance_report", "Read-only. P5 explained in plain words, per backup plan: enabled, events (pool, level, frequency in words, next run), tasks and folders, last run per task with result, retention; flags with a one-line reason and a recommendation (keep / merge / disable / delete): never ran or only failed, disabled for long, folders in several plans, tasks on folders that do not exist, pools without (appendable) volumes, events whose pool has no tape in the library; plus server-wide settings (maintenance restart window and what it waits for, plan stop/cancel times, mail). Each deletable/disable-able flag carries an `apply` item for governance_apply.", {}, () => gov.governanceReport(cfg));
+tool("governance_apply", "Applies ONE recommendation from governance_report: item is disable-plan:<id>, delete-plan:<id> or disable-task:<id>. Refuses a plan with active jobs. Reads the result back. Requires confirm:true; without it only what would run is returned.", { item: z.string(), confirm: confirmArg }, (a) => gov.governanceApply(cfg, a.item, Boolean(a.confirm)));
+tool("schedule_check", "Read-only forecast of all enabled events for the next N days (default 7): start, expected duration (median of past runs), pool, drive generation needed. Warns about overlaps per drive generation and per pool, runs reaching into P5's maintenance restart window, and runs whose pool has no appendable tape in the library.", { days: z.number().optional() }, (a) => gov.scheduleCheck(cfg, { days: a.days }));
+tool("ensure_done", "Checks that every scheduled run since `since` (YYYY-MM-DD or YYYY-MM-DDTHH:MM, default 24 h) produced a successful job for every enabled task of its plan; lists failed, stopped, missing and still-waiting tasks. rerun:true with confirm:true re-runs exactly the failed/stopped/missing tasks once (run_tasks_once, same pool); never cancels anything. mail:true sends the report to operatorMail through the host MTA (independent of P5's own mail). Call it after the nightly window.", { since: z.string().optional(), rerun: z.boolean().optional(), mail: z.boolean().optional(), confirm: confirmArg }, (a) => gov.ensureDone(cfg, { since: a.since, rerun: a.rerun, confirm: Boolean(a.confirm), mail: a.mail }));
+tool("notify_status", "Read-only. P5's mail setup in plain words (SMTP server, port, TLS, sender, login yes/no, recipients) plus what P5's log says (last mail sent, recent failures) and a one-line problem when mail is broken or silent.", {}, () => gov.notifyStatus(cfg));
+tool("notify_set", "P5 offers no API for its mail settings: returns the current settings, why nothing was changed and the GUI steps. Never takes a password as an argument (only a password file path).", { server: z.string().optional(), port: z.number().optional(), tls: z.string().optional(), sender: z.string().optional(), user: z.string().optional(), passwordFile: z.string().optional(), recipients: z.array(z.string()).optional(), confirm: confirmArg }, (a) => gov.notifySet(cfg, a, Boolean(a.confirm)));
+tool("notify_test", "P5 has no test-mail command. Checks that P5's SMTP server accepts connections from the P5 side and shows the log evidence; with confirm:true also sends one test mail via the host MTA to operatorMail (config only), which proves the host path, not P5's.", { confirm: confirmArg }, (a) => gov.notifyTest(cfg, Boolean(a.confirm)));
 tool("library_layout", "Read-only. Per slot: barcode, P5 volume label/pool, target pool from the config slotLayout, status ok/misplaced/foreign/empty; drives and mail slots too.", {}, () => lib.libraryLayout(cfg));
 tool("library_arrange", "Computes the minimal list of mtx transfer moves (via free slots when needed) to reach slotLayout. Refuses while a drive is loaded or a P5 job runs. confirm:true runs the plan and then a P5 jukebox inventory + reconcile; without it only the plan is returned. For a dialog use library_plan/library_step instead.", { confirm: confirmArg, force: forceArg }, (a) => lib.libraryArrange(cfg, Boolean(a.confirm), Boolean(a.force)));
 tool("tape_export", "Moves a tape (barcode or volume label) from its slot to the first free mail slot, then a P5 inventory. Same busy refusals as other tape tools. Dry plan without confirm.", { tape: z.string().describe("Barcode or P5 volume label"), confirm: confirmArg, force: forceArg }, (a) => lib.tapeExport(cfg, a.tape, Boolean(a.confirm), Boolean(a.force)));
 tool("tape_import", "Moves the tape in a mail slot to the target slot of its pool per slotLayout (else the first free slot), then a P5 inventory. Dry plan without confirm.", { mailSlot: z.number().optional(), confirm: confirmArg, force: forceArg }, (a) => lib.tapeImport(cfg, a.mailSlot, Boolean(a.confirm), Boolean(a.force)));
-tool("restore_options", "Read-only. Every backed-up version (backup job) of a file or folder, newest first: date/time, job, plan, pool, volume label, barcode and the tape's current location (drive / library slot / mail slot / not in the library), plus a fetch list of tapes not in the library. Feed a job id to `restore`.", { path: z.string().describe("Absolute path as P5 sees it"), since: z.string().optional().describe("YYYY-MM-DD") }, (a) => lib.restoreOptions(cfg, a.path, { since: a.since }));
+tool("restore_options", "Read-only. Every backed-up version of a file or folder, newest first, from P5's per-client backup index: backup time, file modification time, size, plan, level, and every volume holding a copy (label, pool, barcode, current location: drive / library slot / mail slot / not in the library), plus a fetch list of tapes to bring back when no copy is in the library. Feed a version's `start` to `restore` as `at`.", { path: z.string().describe("Absolute path as P5 sees it"), since: z.string().optional().describe("YYYY-MM-DD"), client: z.string().optional().describe("P5 client (default localhost)") }, (a) => lib.restoreOptions(cfg, a.path, { since: a.since, client: a.client }));
 tool("offsite_status", "Read-only. Per tape pool: volumes in the library, in the mail slot or out; warns about pools with no volume out of the house. With path, also the fetch list for that restore_options result.", { path: z.string().optional() }, async (a) => {
   const o = (await lib.offsiteStatus(cfg)) as Record<string, unknown>;
   if (a.path) o.fetchList = (await lib.offsiteFetchList(cfg, a.path)).fetchList;

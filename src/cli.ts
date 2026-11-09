@@ -20,6 +20,7 @@ import * as cops from "./containerops.js";
 import * as tops from "./taskops.js";
 import { restRequest, restResources, type RestMethod } from "./rest.js";
 import * as lib from "./libops.js";
+import * as gov from "./govops.js";
 import { P5Error } from "./transport.js";
 
 const USAGE = `archiware — manage an Archiware P5 server (docker, ssh or local mode)
@@ -46,7 +47,7 @@ Commands:
                          DESTRUCTIVE: label EMPTY tapes; --drive forces that drive (needs --yes)
   restore_lookup <volume|job> [--job]               list what a backup volume (or job's volumes) holds
   restore <volume> <path> <target-dir>              restore a backed-up folder to an ALTERNATE dir (needs --yes)
-  restore --job <job> <path> <target-dir>           restore the version (job) chosen from restore_options; refuses if its tape is not in the library
+  restore --at "<start>" <path> <target-dir>        restore the version chosen from restore_options (needs --yes); refuses if no copy is in the library
   add_plan_folder <plan> <path>                   add one folder as a new enabled task (needs --yes)
   add_plan_folders <plan> <path...> [--filter <f>]  add folders as enabled tasks (needs --yes)
   create_plan <name> [--retention <days>]         create a plan (needs --yes)
@@ -71,11 +72,18 @@ Commands:
   run-once <plan> <task...> [--pool P] [--level full|incr]
                          back up chosen tasks once via a temporary plan (needs --yes)
   run-once-cleanup <temp plan>                    delete a temporary run-once plan (needs --yes)
+  governance_report      per plan: schedule in words, folders, last run per task, retention; flags with keep/merge/disable/delete; pools; server settings (restart window, mail)
+  governance_apply <item>  apply ONE recommendation: disable-plan:<id> | delete-plan:<id> | disable-task:<id> (needs --yes, read back)
+  schedule_check [--days N]  timeline of enabled events with expected duration, drive generation, pool; overlaps, restart window, pools without appendable tape
+  ensure_done [--since T] [--rerun] [--mail]  every scheduled run since T: did every task produce a successful job? --rerun re-runs the failed/missing tasks once (needs --yes); --mail sends the result to operatorMail through the host MTA
+  notify_status          P5 mail setup in words (SMTP server, port, TLS, sender, auth, recipients) + what its log says
+  notify_set [--server S --port N --tls T --sender A --user U --password-file F --recipients a,b]   P5 offers no API for this: prints why and the GUI steps
+  notify_test [--yes]    SMTP reachability from P5, log evidence; with --yes also a test mail via the host MTA to operatorMail
   library_layout         per slot: barcode, P5 label/pool, target pool (config slotLayout), ok/misplaced/foreign/empty; drives, mail slots
   library_arrange        minimal mtx move list to reach the slotLayout (dry plan; --yes runs it, refused while busy)
   tape_export <barcode|label>                     slot -> first free mail slot (dry plan; --yes)
   tape_import [mail slot]                         mail slot -> its pool's slot per slotLayout (dry plan; --yes)
-  restore_options <path> [--since YYYY-MM-DD]     every backed-up version of a file/folder, newest first: job, pool, volume, barcode, location, fetch list
+  restore_options <path> [--since YYYY-MM-DD] [--client C]   every backed-up version of a file/folder from P5's backup index, newest first, with the volumes (copies) holding it, barcode, location, fetch list
   offsite_status [--path <p>]                     per pool: volumes in library / mail slot / out; pools with nothing out; fetch list for a path
   library_plan arrange | export <tape> | import [mail slot] [--simulate]    start a step-by-step session
   library_step <session> [--yes]                  execute exactly one next step (human steps are verified)
@@ -98,7 +106,7 @@ Options:
   --force  override the "library busy" check on tape_* / clean_drive
 `;
 
-const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", "job", "mail-slot", ...Object.keys(SETUP_FLAGS)]);
+const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", "job", "mail-slot", "at", "client", "days", "password-file", "server", "port", "tls", "sender", "user", "recipients", ...Object.keys(SETUP_FLAGS)]);
 
 function parseArgs(argv: string[]) {
   const flags = new Set<string>();
@@ -204,6 +212,41 @@ function printResult(name: string, data: unknown, json: boolean) {
       if (j.protocol) console.log(`\nProtocol:\n${j.protocol}`);
       break;
     }
+    case "governance_report": {
+      const g = d as unknown as { plans: Record<string, any>[]; pools: Record<string, unknown>[]; server: string[]; flags: Record<string, unknown>[]; foldersInSeveralPlans: Record<string, unknown>[] };
+      for (const p of g.plans) {
+        console.log(`\n${p.enabled ? "ENABLED " : "disabled"} ${p.name} (${p.id}) retention ${p.retentionDays} d, ${p.taskCount} task(s), last run ${p.lastRun ? `${p.lastRun.start} ${p.lastRun.result}` : "none in window"}`);
+        for (const e of p.events) console.log(`   event ${e.name}: ${e.level} into pool ${e.pool}, ${e.frequency}; next ${e.nextRun ?? "none"}`);
+        for (const t of p.tasks) console.log(`   task ${t.task}${t.enabled ? "" : " (disabled)"}: ${t.folders.join(" ")}${t.foldersMissing.length ? "  [MISSING: " + t.foldersMissing.join(" ") + "]" : ""} -> ${t.lastRun ? `${t.lastRun.start} ${t.lastRun.result} (job ${t.lastRun.job})` : "never ran in window"}`);
+        for (const f of p.flags) console.log(`   FLAG: ${f.reason} => ${f.recommendation}${f.apply ? `  [${f.apply}]` : ""}`);
+      }
+      console.log("\nFolders backed up by several enabled plans:");
+      table(g.foldersInSeveralPlans.map((o) => ({ folder: o.folder, kind: o.kind, plans: (o.plans as string[]).join(", ") })), ["folder", "kind", "plans"]);
+      console.log("\nPools:");
+      table(g.pools.map((p) => ({ ...p, flags: (p.flags as string[]).join("; ") })), ["pool", "mediaType", "generation", "volumes", "inLibrary", "appendableInLibrary", "flags"]);
+      console.log("\nServer settings:");
+      for (const l of g.server) console.log(`  - ${l}`);
+      console.log(`\n${g.flags.length} flag(s).`);
+      break;
+    }
+    case "schedule_check": {
+      const r = d as unknown as { runs: Record<string, unknown>[]; warnings: string[]; note: string };
+      table(r.runs, ["start", "end", "plan", "event", "pool", "driveGeneration", "expectedMinutes", "durationFromHistory"]);
+      console.log("");
+      for (const w of r.warnings) console.log(`WARNING: ${w}`);
+      console.log(`\n${r.runs.length} run(s), ${r.warnings.length} warning(s). ${r.note}`);
+      break;
+    }
+    case "ensure_done":
+      for (const l of (d as unknown as { summary: string[] }).summary) console.log(l);
+      for (const k of ["rerun", "mailed"]) if (d[k] !== undefined) console.log(`${k}: ${JSON.stringify(d[k])}`);
+      break;
+    case "notify_status": {
+      for (const l of (d as unknown as { words: string[] }).words) console.log(`- ${l}`);
+      console.log(`\n${(d as { where: string }).where}`);
+      if ((d as { problem: string | null }).problem) console.log(`PROBLEM: ${(d as { problem: string }).problem}`);
+      break;
+    }
     case "job-history": {
       const h = d as unknown as { jobs: Record<string, unknown>[]; scannedIds: number; roundTrips: number };
       table(h.jobs, ["id", "plan", "task", "status", "completion", "start", "size", "files", "source"]);
@@ -231,11 +274,11 @@ function printResult(name: string, data: unknown, json: boolean) {
     case "restore_options": {
       const r = d as unknown as { path: string; versions: Record<string, any>[]; fetchList: Record<string, unknown>[]; note: string };
       table(
-        r.versions.map((v) => ({ start: v.start, job: v.job, plan: v.plan, level: v.level, pool: v.pool, root: v.root, size: ops.kbToHuman(v.sizeKb), volume: v.volumes.map((x: any) => x.label ?? x.id).join(","), barcode: v.volumes.map((x: any) => x.barcode ?? "-").join(","), where: v.volumes.map((x: any) => x.location).join(", ") })),
-        ["start", "job", "plan", "level", "pool", "root", "size", "volume", "barcode", "where"],
+        r.versions.map((v) => ({ start: v.start, modified: v.mtime, plan: v.plan, level: v.level, size: ops.kbToHuman(v.sizeBytes / 1024), volume: v.volumes.map((x: any) => x.label ?? x.id).join(","), barcode: v.volumes.map((x: any) => x.barcode ?? "-").join(","), where: v.volumes.map((x: any) => x.location).join(", ") })),
+        ["start", "modified", "plan", "level", "size", "volume", "barcode", "where"],
       );
       console.log("\nFetch list (tapes not in the library):");
-      table(r.fetchList, ["barcode", "label", "volume", "jobs"]);
+      table(r.fetchList, ["barcode", "label", "volume", "versions"]);
       console.log(`\n${r.note}`);
       break;
     }
@@ -410,10 +453,10 @@ async function main() {
       break;
     }
     case "restore": {
-      if (values.has("job")) {
+      if (values.has("at")) {
         const [path, target] = positional.slice(1);
-        if (!path || !target) throw new Error("usage: archiware restore --job <job> <path> <target-dir> --yes");
-        printResult("restore", await lib.restoreVersion(cfg, values.get("job")!, path, target, yes), json);
+        if (!path || !target) throw new Error('usage: archiware restore --at "<YYYY-MM-DD HH:MM>" <path> <target-dir> --yes');
+        printResult("restore", await lib.restoreVersion(cfg, values.get("at")!, path, target, yes), json);
         break;
       }
       const [volume, path, target] = positional.slice(1);
@@ -421,6 +464,34 @@ async function main() {
       printResult("restore", await ops.restore(cfg, volume, path, target, yes), json);
       break;
     }
+    case "governance_report":
+      printResult("governance_report", await gov.governanceReport(cfg), json);
+      break;
+    case "governance_apply": {
+      if (!positional[1]) throw new Error("usage: archiware governance_apply <disable-plan:ID|delete-plan:ID|disable-task:ID> --yes");
+      printResult("governance_apply", await gov.governanceApply(cfg, positional[1], yes), json);
+      break;
+    }
+    case "schedule_check":
+      printResult("schedule_check", await gov.scheduleCheck(cfg, { days: values.has("days") ? Number(values.get("days")) : undefined }), json);
+      break;
+    case "ensure_done": {
+      const r = await gov.ensureDone(cfg, { since: values.get("since"), rerun: flags.has("rerun"), confirm: yes, mail: flags.has("mail") });
+      printResult("ensure_done", r, json);
+      process.exitCode = r.allDone ? 0 : 3;
+      break;
+    }
+    case "notify_status": {
+      const n = await gov.notifyStatus(cfg);
+      printResult("notify_status", n, json);
+      break;
+    }
+    case "notify_set":
+      printResult("notify_set", await gov.notifySet(cfg, { server: values.get("server"), port: values.has("port") ? Number(values.get("port")) : undefined, tls: values.get("tls"), sender: values.get("sender"), user: values.get("user"), passwordFile: values.get("password-file"), recipients: values.get("recipients")?.split(",") }, yes), json);
+      break;
+    case "notify_test":
+      printResult("notify_test", await gov.notifyTest(cfg, yes), json);
+      break;
     case "library_layout":
       printResult("library_layout", await lib.libraryLayout(cfg), json);
       break;
@@ -437,7 +508,7 @@ async function main() {
       break;
     case "restore_options": {
       if (!positional[1]) throw new Error("usage: archiware restore_options <path> [--since YYYY-MM-DD]");
-      printResult("restore_options", await lib.restoreOptions(cfg, positional[1], { since: values.get("since") }), json);
+      printResult("restore_options", await lib.restoreOptions(cfg, positional[1], { since: values.get("since"), client: values.get("client") }), json);
       break;
     }
     case "offsite_status": {

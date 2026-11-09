@@ -13,7 +13,7 @@ import { basename } from "node:path";
 import type { ArchiwareConfig } from "./config.js";
 import { preferRest, restJobs } from "./restops.js";
 import { restGet } from "./rest.js";
-import { chatNames, hostCommand, P5Error, shellQuote } from "./transport.js";
+import { chatNames, hostCommand, nsdchatCalls, P5Error, shellQuote } from "./transport.js";
 
 export type Progress = (msg: string) => void;
 const noProgress: Progress = () => undefined;
@@ -87,14 +87,14 @@ export function checkSizes(out: string): Record<string, number> {
 // Guards
 // ---------------------------------------------------------------------------
 
-/** Pure: ids of jobs in a running state (waiting/scheduled jobs do not block). */
+/** Pure: ids of jobs that block a restart: running, waiting or pending (scheduled future runs do not). */
 export function runningJobIds(rows: Record<string, unknown>[]): string[] {
-  return rows.filter((r) => String(r.status) === "running").map((r) => String(r.id));
+  return rows.filter((r) => /^(running|waiting|pending)$/.test(String(r.status))).map((r) => String(r.id));
 }
 
 export function refuseIfJobsRunning(ids: string[], force: boolean, what: string): void {
   if (ids.length > 0 && !force) {
-    throw new P5Error(`refusing to ${what}: P5 job(s) ${ids.join(", ")} running; wait, cancel them (job_cancel) or pass force/--force`);
+    throw new P5Error(`refusing to ${what}: P5 job(s) ${ids.slice(0, 10).join(", ")}${ids.length > 10 ? ` (+${ids.length - 10} more)` : ""} running or waiting; wait for them to finish, cancel them yourself (job_cancel) or pass force/--force`);
   }
 }
 
@@ -102,7 +102,13 @@ async function runningJobs(cfg: ArchiwareConfig): Promise<string[]> {
   return preferRest(
     cfg,
     async (c) => runningJobIds(await restJobs(c)),
-    async () => chatNames(cfg, ["Job", "running"]),
+    async () => {
+      // nsdchat `Job pending` also lists future scheduled runs (status "scheduled"); only started-but-waiting jobs block
+      const run = await chatNames(cfg, ["Job", "running"]);
+      const pend = await chatNames(cfg, ["Job", "pending"]);
+      const st = pend.length ? await nsdchatCalls(cfg, pend.map((id) => ["Job", id, "status"])) : [];
+      return [...run, ...pend.filter((_, i) => /^(pending|waiting|running)$/.test(st[i]?.out.trim() ?? ""))];
+    },
   );
 }
 

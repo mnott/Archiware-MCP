@@ -60,3 +60,12 @@ Tested on a dry-run job (`BackupPlan <id> dryrun`, which only starts while the p
 ## archiware-mcp tools
 
 `rest_resources`, `rest` (GET free; POST/PUT/DELETE need confirm / `--yes`; path must be below `/rest/v1`, no `..`), `job_cancel`, `health`. `status`, `jobs` (without `--all`) and `job` prefer REST and fall back to nsdchat. `pools` and `volumes` stay on nsdchat: REST pool detail has no volume list and volume detail has no pool.
+
+## Restore selections and mail (checked live, read-only)
+
+- nsdchat `RestoreSelection`: methods that exist are `create`, `describe`, `volumes`, `entries`, `size`, `addentry <handle>`, `addfromvolume <volume>`, `findentry <archive index or plan> <query>`, `submit`, `destroy`. `findentry` on a backup index or backup plan answers `no such index or plan`; `ArchiveEntry handle` answers `no such database` for backup databases. A selection created and destroyed without submit leaves nothing behind.
+- REST `POST restore/restoreselections` answers HTTP 400 `Missing Client ID` for every JSON body and query shape tried; the body format is undocumented.
+- A failed nsdchat call prints nothing on stderr; `geterror` in the same `nsdchat -c` Tcl script returns the message.
+- The backup index per client is SQLite under `<config>/index/backup/bsx_<client>/` (`files.db` elements with btime/dtime/mtime/size and `snapshots`, `addrs.db` addresses id -> volume id). P5's mail settings (`Client` `localhost`: mailServer, mailPort, mailSender, mailUser, encrypted password; `UserPref`: email, allowNotify, mailSeverity) are in `customerconfig/resources.db`. Neither is reachable through nsdchat or REST.
+- nsdchat `Job pending` also lists future scheduled runs (status `scheduled`).
+- The maintenance restart window is logged at start (`Attempt restart on Sun, 04:00 - 07:00`); not exposed by nsdchat or REST.

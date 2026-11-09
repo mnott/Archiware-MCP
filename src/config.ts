@@ -72,6 +72,16 @@ export interface ArchiwareConfig {
   backupDir: string;
   /** Host dir (docker mode) of the docker compose project (cold copy source). */
   composeDir: string;
+  /** Host path of P5's config folder (holds customerconfig/ and index/backup/). Default: derived from logPath (<logdir>/../config) or <p5Home>/config. Used read-only. */
+  p5ConfigDir: string;
+  /** Operator mail address for ensure_done --mail and notify_test (sent by the host MTA, independent of P5's own mail). Empty = none. */
+  operatorMail: string;
+  /** Days without a sent P5 mail (while jobs ran) before doctor/health warn. Default 3. */
+  mailSilenceDays: number;
+  /** Months back governance_report looks for runs when judging plans. Default 3. */
+  governanceMonths: number;
+  /** Days a plan may stay disabled before governance_report flags it. Default 60. */
+  disabledDays: number;
 }
 
 /**
@@ -101,6 +111,11 @@ export const DEFAULT_CONFIG: ArchiwareConfig = {
   healthPaths: [],
   backupDir: "",
   composeDir: "",
+  p5ConfigDir: "",
+  operatorMail: "",
+  mailSilenceDays: 3,
+  governanceMonths: 3,
+  disabledDays: 60,
 };
 
 export function configPath(): string {
@@ -152,6 +167,11 @@ export function buildConfig(file: Partial<ArchiwareConfig>): ArchiwareConfig {
     healthPaths: Array.isArray(file.healthPaths) ? file.healthPaths : DEFAULT_CONFIG.healthPaths,
     backupDir: trimSlash(process.env.ARCHIWARE_BACKUP_DIR ?? file.backupDir ?? DEFAULT_CONFIG.backupDir),
     composeDir: trimSlash(file.composeDir ?? DEFAULT_CONFIG.composeDir),
+    p5ConfigDir: trimSlash(file.p5ConfigDir ?? DEFAULT_CONFIG.p5ConfigDir),
+    operatorMail: file.operatorMail ?? DEFAULT_CONFIG.operatorMail,
+    mailSilenceDays: file.mailSilenceDays ?? DEFAULT_CONFIG.mailSilenceDays,
+    governanceMonths: file.governanceMonths ?? DEFAULT_CONFIG.governanceMonths,
+    disabledDays: file.disabledDays ?? DEFAULT_CONFIG.disabledDays,
   };
 }
 

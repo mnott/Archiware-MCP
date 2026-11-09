@@ -313,5 +313,18 @@ export async function health(cfg: ArchiwareConfig): Promise<{ overall: Level; ch
       return errs.length ? { level: "warn", reason: `${errs.length} Error line(s) in last 500, latest: ${errs[errs.length - 1].trim().slice(0, 120)}` } : { level: "ok", reason: "no Error lines in last 500" };
     }),
   );
+  checks.push(
+    await check("mail", async () => {
+      // Silence detector: P5's own mail can break unnoticed (the job still "succeeds"). Reads P5's mail
+      // settings and its log; ensure_done --mail reports through the host MTA independently of this.
+      if (!cfg.logPath) return { level: "ok", reason: "no logPath configured (skipped)" };
+      const g = await import("./govops.js");
+      const [mc, ev] = await Promise.all([g.readMailConfig(cfg).catch(() => null), g.mailLogEvidence(cfg)]);
+      const problem = g.mailProblem(mc, ev, cfg.mailSilenceDays);
+      if (problem) return { level: "warn", reason: problem };
+      if (!mc) return { level: "warn", reason: "cannot read P5's mail settings (needs sqlite3 on the P5 host); log shows " + (ev?.lastSent ? `last mail sent ${ev.lastSent}` : "no mail sent") };
+      return { level: "ok", reason: `${mc.server}:${mc.port}, last mail sent ${ev?.lastSent ?? "never"}` };
+    }),
+  );
   return { overall: worst(checks), checks };
 }
