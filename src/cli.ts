@@ -21,6 +21,7 @@ import * as tops from "./taskops.js";
 import { restRequest, restResources, type RestMethod } from "./rest.js";
 import * as lib from "./libops.js";
 import * as gov from "./govops.js";
+import * as cat from "./catalog.js";
 import { P5Error } from "./transport.js";
 
 const USAGE = `archiware — manage an Archiware P5 server (docker, ssh or local mode)
@@ -89,6 +90,12 @@ Commands:
   library_step <session> [--yes]                  execute exactly one next step (human steps are verified)
   library_status <session> / library_abort <session>
   library_reconcile [--yes]                       compare P5 volume locations with mtx, cleaningSlot, plan events (--yes fixes cleaningSlot in the config)
+  catalog_init           create the file catalogue schema (MySQL archive_catalog) idempotently
+  pack <source dir> --set NAME [--max 50G] [--into <pack root>] [--replan]   cut a folder into tars and catalogue every file (plan without --yes; --yes writes, resumable)
+  catalog_sets           sets with tars, files, bytes, status
+  catalog_search <pattern> [--set NAME] [--limit N]   find files (glob or substring) with tar, on-disk and tape location
+  catalog_restore <path> --set NAME --to <dir>   extract one file from its tar (from disk, else via tape restore) (needs --yes)
+  catalog_drop --set NAME                         delete a set's catalogue rows, not its tars (needs --yes)
   health                 one-call P5 health check (exit code 1 on any fail; part of doctor)
   rest_resources         list the REST API resources
   rest <path> [--method GET|POST|PUT|DELETE] [--body <json>]
@@ -106,7 +113,7 @@ Options:
   --force  override the "library busy" check on tape_* / clean_drive
 `;
 
-const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", "job", "mail-slot", "at", "client", "days", "password-file", "server", "port", "tls", "sender", "user", "recipients", ...Object.keys(SETUP_FLAGS)]);
+const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", "job", "mail-slot", "at", "client", "days", "password-file", "server", "port", "tls", "sender", "user", "recipients", "set", "max", "into", "to", ...Object.keys(SETUP_FLAGS)]);
 
 function parseArgs(argv: string[]) {
   const flags = new Set<string>();
@@ -149,6 +156,11 @@ function printResult(name: string, data: unknown, json: boolean) {
   }
   const d = data as Record<string, unknown>;
   // Any mutation without --yes: print the exact commands that WOULD run.
+  if (d.confirmationRequired === true && !Array.isArray(d.wouldRun)) {
+    printJson(data);
+    console.log("\nRe-run with --yes to actually do it.");
+    return;
+  }
   if (d.confirmationRequired === true) {
     console.log(d.note as string);
     console.log("Would run:");
@@ -492,6 +504,32 @@ async function main() {
     case "notify_test":
       printResult("notify_test", await gov.notifyTest(cfg, yes), json);
       break;
+    case "catalog_init":
+      printResult("catalog_init", await cat.catalogInit(cfg), json);
+      break;
+    case "pack": {
+      if (!positional[1] || !values.get("set")) throw new Error("usage: archiware pack <source dir> --set NAME [--max 50G] [--into <pack root>] [--yes]");
+      printResult("pack", await cat.pack(cfg, positional[1], { set: values.get("set")!, max: values.get("max"), into: values.get("into"), confirm: yes, replan: flags.has("replan") }, cliProgress), json);
+      break;
+    }
+    case "catalog_sets":
+      printResult("catalog_sets", await cat.catalogSets(cfg), json);
+      break;
+    case "catalog_search": {
+      if (!positional[1]) throw new Error("usage: archiware catalog_search <pattern> [--set NAME] [--limit N]");
+      printResult("catalog_search", await cat.catalogSearch(cfg, positional[1], { set: values.get("set"), limit: values.has("limit") ? Number(values.get("limit")) : undefined }), json);
+      break;
+    }
+    case "catalog_restore": {
+      if (!positional[1] || !values.get("set") || !values.get("to")) throw new Error("usage: archiware catalog_restore <path> --set NAME --to <dir> [--yes]");
+      printResult("catalog_restore", await cat.catalogRestore(cfg, positional[1], { set: values.get("set")!, to: values.get("to")!, confirm: yes }, cliProgress), json);
+      break;
+    }
+    case "catalog_drop": {
+      if (!values.get("set")) throw new Error("usage: archiware catalog_drop --set NAME [--yes]");
+      printResult("catalog_drop", await cat.catalogDrop(cfg, values.get("set")!, yes), json);
+      break;
+    }
     case "library_layout":
       printResult("library_layout", await lib.libraryLayout(cfg), json);
       break;

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New file catalogue for D2D2T packs (MySQL `archive_catalog` on the P5 host): `catalog_init`, `pack` (plan, then resumable tar writing with sha256, listing and per-tar transactional rows), `catalog_sets`, `catalog_search` (with tape location per tar), `catalog_restore` (from disk or via tape), `catalog_drop`; config keys `catalogMysqlContainer`, `catalogDbCnf`, `packRoot`, `packRootP5`, `packMBps`.
+
 - Fixed `restore_options` / `restore`: versions now come from P5's per-client backup index (read-only, via sqlite3 on the host) instead of job roots, so a path's real versions with every volume copy are listed; `restore --at "<start>"` replaces `--job`. P5's nsdchat/REST cannot put a single backup entry into a restore selection (documented in the README).
 - New `governance_report`, `governance_apply`, `schedule_check`, `ensure_done` (with `--rerun`, `--mail`), `notify_status`, `notify_set`, `notify_test`; `doctor`/`health` get a `mail` silence check; new config keys `operatorMail`, `mailSilenceDays`, `governanceMonths`, `disabledDays`, `p5ConfigDir`.
 - Restart guard now also counts waiting jobs.

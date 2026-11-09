@@ -82,6 +82,16 @@ export interface ArchiwareConfig {
   governanceMonths: number;
   /** Days a plan may stay disabled before governance_report flags it. Default 60. */
   disabledDays: number;
+  /** Docker container on the P5 host running the MySQL file catalogue. Default "mysql". */
+  catalogMysqlContainer: string;
+  /** File on the P5 host (mode 600) with the MySQL client credentials of the catalogue user. Default /root/.mysql-catalog.cnf. Never printed. */
+  catalogDbCnf: string;
+  /** Host directory under which pack writes its tar sets. Default /srv/archive/pack (placeholder). */
+  packRoot: string;
+  /** The same directory as P5 sees it (docker mount point); "" = same as packRoot. Used to look tars up in P5's backup index. */
+  packRootP5: string;
+  /** Assumed tar write throughput in MB/s for the pack time estimate. Default 150. */
+  packMBps: number;
 }
 
 /**
@@ -116,6 +126,11 @@ export const DEFAULT_CONFIG: ArchiwareConfig = {
   mailSilenceDays: 3,
   governanceMonths: 3,
   disabledDays: 60,
+  catalogMysqlContainer: "mysql",
+  catalogDbCnf: "/root/.mysql-catalog.cnf",
+  packRoot: "/srv/archive/pack",
+  packRootP5: "",
+  packMBps: 150,
 };
 
 export function configPath(): string {
@@ -172,6 +187,11 @@ export function buildConfig(file: Partial<ArchiwareConfig>): ArchiwareConfig {
     mailSilenceDays: file.mailSilenceDays ?? DEFAULT_CONFIG.mailSilenceDays,
     governanceMonths: file.governanceMonths ?? DEFAULT_CONFIG.governanceMonths,
     disabledDays: file.disabledDays ?? DEFAULT_CONFIG.disabledDays,
+    catalogMysqlContainer: file.catalogMysqlContainer ?? DEFAULT_CONFIG.catalogMysqlContainer,
+    catalogDbCnf: file.catalogDbCnf ?? DEFAULT_CONFIG.catalogDbCnf,
+    packRoot: trimSlash(file.packRoot ?? DEFAULT_CONFIG.packRoot),
+    packRootP5: trimSlash(file.packRootP5 ?? DEFAULT_CONFIG.packRootP5),
+    packMBps: file.packMBps ?? DEFAULT_CONFIG.packMBps,
   };
 }
 

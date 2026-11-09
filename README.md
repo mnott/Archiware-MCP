@@ -123,6 +123,7 @@ archiware restore <volume> <path> <target-dir> --yes     restore to an ALTERNATE
 archiware restore --at "<start>" <path> <target-dir> --yes  restore the version chosen from restore_options
 archiware governance_report | governance_apply <item> | schedule_check [--days N] | ensure_done [--since T] [--rerun] [--mail] | notify_status | notify_set | notify_test
 archiware library_layout | library_arrange | tape_export <tape> | tape_import [mail slot] | restore_options <path> | offsite_status [--path p]
+archiware catalog_init | pack <source> --set NAME [--max 50G] [--into <root>] [--yes] | catalog_sets | catalog_search <pattern> [--set N] [--limit N] | catalog_restore <path> --set N --to <dir> --yes | catalog_drop --set N --yes
 archiware library_plan arrange|export <tape>|import [slot] [--simulate] | library_step <session> | library_status <session> | library_abort <session> | library_reconcile
 archiware label_tapes <jukebox> <pool> <slot...> --yes   DESTRUCTIVE: label EMPTY tapes
 archiware inventory <jukebox> [--barcode] --yes          schedule inventory job
@@ -142,7 +143,7 @@ archiware container_status | container_backup | container_stop | container_start
 
 ## MCP tools
 
-Same names as the CLI subcommands (`status`, `slots`, `volumes`, `pools`, `plans`, `plan`, `jobs`, `job`, `dryrun_plan`, `start_plan`, `enable_plan`, `disable_plan`, `stop_job`, `job_cancel`, `job_history`, `find_tasks`, `task_enable`, `task_disable`, `task_set_directories`, `run_tasks_once`, `run_tasks_once_cleanup`, plan editing tools, `volume_enable`, `restore_lookup`, `restore`, `library_layout`, `library_arrange`, `tape_export`, `tape_import`, `restore_options`, `governance_report`, `governance_apply`, `schedule_check`, `ensure_done`, `notify_status`, `notify_set`, `notify_test`, `offsite_status`, `library_plan`, `library_step`, `library_status`, `library_abort`, `library_reconcile`, `label_tapes`, `inventory`, `set_cleaning`, `tape_*`, `clean_drive`, `health`, `rest_resources`, `rest`, `nsdchat`, `container_*`). `archiware setup` registers the server with `claude mcp add` (user scope); by hand: `claude mcp add archiware -s user -- archiware-mcp`.
+Same names as the CLI subcommands (`status`, `slots`, `volumes`, `pools`, `plans`, `plan`, `jobs`, `job`, `dryrun_plan`, `start_plan`, `enable_plan`, `disable_plan`, `stop_job`, `job_cancel`, `job_history`, `find_tasks`, `task_enable`, `task_disable`, `task_set_directories`, `run_tasks_once`, `run_tasks_once_cleanup`, plan editing tools, `volume_enable`, `restore_lookup`, `restore`, `library_layout`, `library_arrange`, `tape_export`, `tape_import`, `restore_options`, `governance_report`, `governance_apply`, `schedule_check`, `ensure_done`, `notify_status`, `notify_set`, `notify_test`, `offsite_status`, `catalog_init`, `pack`, `catalog_sets`, `catalog_search`, `catalog_restore`, `catalog_drop`, `library_plan`, `library_step`, `library_status`, `library_abort`, `library_reconcile`, `label_tapes`, `inventory`, `set_cleaning`, `tape_*`, `clean_drive`, `health`, `rest_resources`, `rest`, `nsdchat`, `container_*`). `archiware setup` registers the server with `claude mcp add` (user scope); by hand: `claude mcp add archiware -s user -- archiware-mcp`.
 
 ## Notes on the newer tools
 
@@ -206,6 +207,29 @@ archiware-mcp is meant as the primary interface to the tape library and to resto
 **Conversational execution.** Rearranging and import/export run as a dialog, state in `library_session.json` next to the config. `library_plan arrange|export <tape>|import [slot]` proposes the steps and returns a session id; `library_step <session>` executes exactly one step (confirm-gated) and returns what happened plus the next instruction, including human steps ("put the tape into mail slot 24, then call library_step again", "take tape X out of the mail slot"), which are verified rather than executed; `library_status` shows done/next/remaining; `library_abort` stops cleanly and checks that no tape is in a drive (transfers only move slot to slot). Each step re-checks drives, running jobs and the expected slot contents, and stops with a clear message when reality differs from the plan. `--simulate` walks a session on a virtual copy of the library without touching hardware.
 
 **One long call blocks the others, by design.** P5's CLI cannot run in parallel, so every nsdchat call takes an exclusive host lock (`lockWaitS`). Normal calls are short (`timeoutMs`); the few calls that legitimately take minutes (a volume inventory) use the separate "long" mode with `longTimeoutMs`. While one runs, every other nsdchat call (other sessions, the MCP) waits and may time out. Avoid whole-volume inventories on large volumes.
+
+## File catalogue (D2D2T)
+
+Data that is packed into tar files before it goes to tape needs a "which file is in which tar" level; P5 stays the tape engine (it knows which tar is on which tape, `restore_options` reads that). The catalogue is a MySQL 8 database `archive_catalog` (tables `sets`, `tars`, `entries`) in a container on the P5 host, reached like a host job: `docker exec -i <container> mysql --defaults-extra-file=/dev/stdin ... < <cnf>` over the normal transport. The credentials file stays on the host and is never read or printed. Config keys:
+
+```json
+{
+  "catalogMysqlContainer": "mysql",
+  "catalogDbCnf": "/root/.mysql-catalog.cnf",
+  "packRoot": "/srv/archive/pack",
+  "packRootP5": "",
+  "packMBps": 150
+}
+```
+
+`packRoot` is where tar sets are written (`<packRoot>/<set>/`); `packRootP5` is the same directory as P5 sees it (docker mount), empty = identical; `packMBps` feeds the time estimate.
+
+- `catalog_init` creates the schema idempotently (no FULLTEXT index: substring search is a LIKE on the `(set_id, path)` and `basename` indexes).
+- `pack <source dir> --set NAME [--max 50G] [--into <root>]`: without `--yes` only the plan: one low-priority `find` walk, cut along folder boundaries (a folder bigger than `--max` is split one level deeper, a single file bigger than `--max` gets its own tar), tar names, sizes, file counts and a time estimate. With `--yes`: per tar `tar --sort=inode` to `.part`, sha256, a plain-text `<tar>.list` (path, size, mtime) next to it so the catalogue can be rebuilt from disk or tape alone, then the tar row and all its member rows in ONE transaction (batches of 2000 rows), then the `.done` marker. Rerunning the same command resumes (the plan is stored in `<tar dir>/.plan.json`; `--replan` discards it). It never takes the nsdchat lock. File names containing a newline cannot be packed (reported in the plan); non-UTF-8 bytes in names are dropped from the catalogue copy of the name.
+- `catalog_sets`: sets with tar count, file count, bytes, status.
+- `catalog_search <pattern> [--set N] [--limit N]`: glob (`*` `?`) or substring; per hit set, path, size, mtime, tar, whether the tar is still on disk, and the tape versions of that tar (date, plan, volume label, barcode, location) from `restore_options` on the tar's path.
+- `catalog_restore <path> --set N --to <dir> --yes`: extracts one member from the tar on disk; if the tar is gone it is restored from tape through the normal restore path into a scratch dir under `<packRoot>/.restore`, the member extracted, the scratch tar deleted. Refuses with the fetch list when no needed tape is in the library. P5 restores whole backup volumes, so the tape path inherits the `restore` limit (refused when the volume holds data outside the tar).
+- `catalog_drop --set N --yes`: deletes the set's rows only, not its tars.
 
 ## REST notes
 
