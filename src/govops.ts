@@ -741,18 +741,40 @@ export function classify(rows: JobRow[], task: string, from: Date, to: Date): { 
   return { state: "missing", job: null };
 }
 
+/** Change time (ms) per BackupTask name from P5's resource database (cstamp, microseconds since epoch). P5 bumps it on every job, so it only approximates creation for tasks that never ran. Empty map when unreadable. */
+export async function taskCreated(cfg: ArchiwareConfig): Promise<Map<string, number>> {
+  const m = new Map<string, number>();
+  try {
+    for (const r of await sqliteQuery(cfg, resourcesDb(cfg), "select name,cstamp from BackupTask")) {
+      const us = Number(r[1]);
+      if (r[0] && Number.isFinite(us) && us > 0) m.set(r[0], Math.floor(us / 1000));
+    }
+  } catch { /* fall back to no creation times: every task is expected in every run */ }
+  return m;
+}
+
 export async function ensureDone(cfg: ArchiwareConfig, opts: { since?: string; rerun?: boolean; confirm?: boolean; mail?: boolean } = {}) {
   const now = new Date();
   const since = opts.since ? new Date(opts.since.includes("T") ? opts.since : `${opts.since}T00:00:00`) : new Date(now.getTime() - DAY);
   if (!Number.isFinite(since.getTime())) throw new P5Error(`invalid since "${opts.since}", expected YYYY-MM-DD or YYYY-MM-DDTHH:MM`);
   const plans = (await loadPlans(cfg)).filter((p) => p.enabled);
   const jobs = await loadJobs(cfg, new Date(since.getTime() - 2 * DAY).toISOString().slice(0, 10), 3000);
+  const created = await taskCreated(cfg);
+  const firstJob = new Map<string, number>();
+  for (const j of jobs) {
+    if (!j.task || !j.start) continue;
+    const t = new Date(j.start.replace(" ", "T")).getTime();
+    if (t < (firstJob.get(j.task) ?? Infinity)) firstJob.set(j.task, t);
+  }
   const results: TaskResult[] = [];
   for (const p of plans)
     for (const e of p.events)
       for (const run of eventRuns(e, since, now)) {
         const winEnd = new Date(run.getTime() + 20 * 3_600_000);
         for (const t of p.tasks.filter((x) => x.enabled)) {
+          // A task cannot be expected in a run it could not take part in: with jobs, that is a run ending before its first job; without any job, a run that started before the task row was last written.
+          const first = firstJob.get(t.id);
+          if (first !== undefined ? first >= winEnd.getTime() : (created.get(t.id) ?? 0) > run.getTime()) continue;
           const c = classify(jobs.filter((j) => j.plan === p.name || j.plan?.startsWith(`${p.name} - `)), t.id, new Date(run.getTime() - 10 * 60_000), winEnd);
           results.push({ plan: p.name, planId: p.id, event: evLabel(e), runAt: `${dayStr(run)} ${hhmm(run)}`, task: t.id, folders: t.dirs.join(" "), state: c.state, job: c.job?.id ?? null, completion: c.job?.completion ?? c.job?.status ?? null, pool: e.pool, level: e.level === "1" ? "full" : "incr" });
         }
