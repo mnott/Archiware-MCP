@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- New config keys `slotLayout` (pool -> slot range/list), `mailSlots`, `longTimeoutMs`, `lockWaitS`.
+- New `library_layout`, `library_arrange`: slot layout per pool with ok/misplaced/foreign/empty status, and the minimal confirm-gated `mtx transfer` plan (refused while a drive is loaded or a job runs).
+- New `tape_export` / `tape_import`: move a tape to and from the mail slot, confirm-gated, with a P5 inventory after.
+- New `restore_options <path>`: every backed-up version of a path with job, plan, pool, volume, barcode and current tape location, plus a fetch list. `restore --job <job>` restores a chosen version into a separate directory and refuses when the tape is not in the library.
+- New `offsite_status`: per pool volumes in library / mail slot / out, warning when nothing is out of the house.
+- New `library_reconcile`: P5 locations vs mtx, `cleaningSlot` fix, enabled plan events whose pool has no appendable volume in the library.
+- New persisted conversational sessions: `library_plan`, `library_step`, `library_status`, `library_abort` (human steps, per-step re-checks, `--simulate`).
+- Transport: a separate "long" nsdchat mode (`longTimeoutMs`) for volume inventories, configurable lock wait (`lockWaitS`); README documents that one long call blocks the others by design.
+
 - New `job_history` / `job-history`: past jobs with plan, task, status, completion, start, size, files and the protocol's source line; filters plan, status, since, limit. Walks job ids downward in batched calls (P5 lists only scheduled jobs).
 - New `find_tasks` / `find-tasks <substring>`: plans and tasks whose directories contain the substring, with plan and task enabled flags.
 - New `task_enable`, `task_disable`, `task_set_directories` / `task enable|disable|set-dirs`: confirm-gated, read back before/after.

@@ -44,6 +44,14 @@ export interface ArchiwareConfig {
   logPath: string;
   /** Command timeout in milliseconds. */
   timeoutMs: number;
+  /** Timeout for "long" nsdchat calls (index lookups, inventories), milliseconds. Default 600000. */
+  longTimeoutMs: number;
+  /** Seconds a call waits for the host-side nsdchat lock held by another call. Default 120. */
+  lockWaitS: number;
+  /** Library layout: pool name -> slot range/list ("9-12", "14-22" or [9,10,11]). */
+  slotLayout: Record<string, string | number[]>;
+  /** Import/export (mail slot) element ids; empty = take them from mtx. */
+  mailSlots: number[];
   /** Tape drives, for host-side tape operations (mtx/mt). */
   drives: DriveConfig[];
   /** Slot holding the cleaning tape (barcode CLN*); 0 = none. */
@@ -79,6 +87,10 @@ export const DEFAULT_CONFIG: ArchiwareConfig = {
   changer: "",
   logPath: "",
   timeoutMs: 60_000,
+  longTimeoutMs: 600_000,
+  lockWaitS: 120,
+  slotLayout: {},
+  mailSlots: [],
   drives: [],
   cleaningSlot: 0,
   containerIp: "",
@@ -126,6 +138,10 @@ export function buildConfig(file: Partial<ArchiwareConfig>): ArchiwareConfig {
     changer: file.changer ?? DEFAULT_CONFIG.changer,
     logPath: file.logPath ?? (mode === "docker" ? "" : `${p5Home}/log/lexxsrv.log`),
     timeoutMs: file.timeoutMs ?? DEFAULT_CONFIG.timeoutMs,
+    longTimeoutMs: file.longTimeoutMs ?? DEFAULT_CONFIG.longTimeoutMs,
+    lockWaitS: file.lockWaitS ?? DEFAULT_CONFIG.lockWaitS,
+    slotLayout: file.slotLayout && typeof file.slotLayout === "object" ? file.slotLayout : DEFAULT_CONFIG.slotLayout,
+    mailSlots: Array.isArray(file.mailSlots) ? file.mailSlots.map(Number) : DEFAULT_CONFIG.mailSlots,
     drives: Array.isArray(file.drives) ? file.drives : DEFAULT_CONFIG.drives,
     cleaningSlot: file.cleaningSlot ?? DEFAULT_CONFIG.cleaningSlot,
     containerIp,

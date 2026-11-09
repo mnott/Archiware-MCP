@@ -19,6 +19,7 @@ import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
 import * as tops from "./taskops.js";
 import { restRequest, restResources, type RestMethod } from "./rest.js";
+import * as lib from "./libops.js";
 import { P5Error } from "./transport.js";
 
 const USAGE = `archiware — manage an Archiware P5 server (docker, ssh or local mode)
@@ -45,6 +46,7 @@ Commands:
                          DESTRUCTIVE: label EMPTY tapes; --drive forces that drive (needs --yes)
   restore_lookup <volume|job> [--job]               list what a backup volume (or job's volumes) holds
   restore <volume> <path> <target-dir>              restore a backed-up folder to an ALTERNATE dir (needs --yes)
+  restore --job <job> <path> <target-dir>           restore the version (job) chosen from restore_options; refuses if its tape is not in the library
   add_plan_folder <plan> <path>                   add one folder as a new enabled task (needs --yes)
   add_plan_folders <plan> <path...> [--filter <f>]  add folders as enabled tasks (needs --yes)
   create_plan <name> [--retention <days>]         create a plan (needs --yes)
@@ -69,6 +71,16 @@ Commands:
   run-once <plan> <task...> [--pool P] [--level full|incr]
                          back up chosen tasks once via a temporary plan (needs --yes)
   run-once-cleanup <temp plan>                    delete a temporary run-once plan (needs --yes)
+  library_layout         per slot: barcode, P5 label/pool, target pool (config slotLayout), ok/misplaced/foreign/empty; drives, mail slots
+  library_arrange        minimal mtx move list to reach the slotLayout (dry plan; --yes runs it, refused while busy)
+  tape_export <barcode|label>                     slot -> first free mail slot (dry plan; --yes)
+  tape_import [mail slot]                         mail slot -> its pool's slot per slotLayout (dry plan; --yes)
+  restore_options <path> [--since YYYY-MM-DD]     every backed-up version of a file/folder, newest first: job, pool, volume, barcode, location, fetch list
+  offsite_status [--path <p>]                     per pool: volumes in library / mail slot / out; pools with nothing out; fetch list for a path
+  library_plan arrange | export <tape> | import [mail slot] [--simulate]    start a step-by-step session
+  library_step <session> [--yes]                  execute exactly one next step (human steps are verified)
+  library_status <session> / library_abort <session>
+  library_reconcile [--yes]                       compare P5 volume locations with mtx, cleaningSlot, plan events (--yes fixes cleaningSlot in the config)
   health                 one-call P5 health check (exit code 1 on any fail; part of doctor)
   rest_resources         list the REST API resources
   rest <path> [--method GET|POST|PUT|DELETE] [--body <json>]
@@ -86,7 +98,7 @@ Options:
   --force  override the "library busy" check on tape_* / clean_drive
 `;
 
-const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", ...Object.keys(SETUP_FLAGS)]);
+const VALUE_FLAGS = new Set(["drive", "plan", "status", "since", "limit", "pool", "level", "exception", "filter", "retention", "method", "body", "config", "job", "mail-slot", ...Object.keys(SETUP_FLAGS)]);
 
 function parseArgs(argv: string[]) {
   const flags = new Set<string>();
@@ -133,6 +145,7 @@ function printResult(name: string, data: unknown, json: boolean) {
     console.log(d.note as string);
     console.log("Would run:");
     for (const cmd of d.wouldRun as string[]) console.log(`  ${cmd}`);
+    for (const p of (d.problems as string[] | undefined) ?? []) console.log(`PROBLEM: ${p}`);
     console.log("Re-run with --yes to actually do it.");
     return;
   }
@@ -203,6 +216,47 @@ function printResult(name: string, data: unknown, json: boolean) {
     case "task": {
       const t = d as unknown as { task: string; before: Record<string, unknown>; after: Record<string, unknown> };
       console.log(`Task ${t.task}: ${JSON.stringify(t.before)} -> ${JSON.stringify(t.after)}`);
+      break;
+    }
+    case "library_layout": {
+      const l = d as unknown as { slots: Record<string, unknown>[]; drives: Record<string, unknown>[]; mailSlots: number[]; summary: Record<string, number>; warnings: string[]; poolsWithTapesButNoSlots: string[] };
+      table(l.slots, ["slot", "kind", "barcode", "label", "pool", "targetPool", "status", "note"]);
+      console.log("\nDrives:");
+      table(l.drives, ["drive", "barcode", "label", "pool", "status"]);
+      console.log(`\nSummary: ${JSON.stringify(l.summary)}; mail slots: ${l.mailSlots.join(", ") || "none"}`);
+      if (l.poolsWithTapesButNoSlots.length) console.log(`Pools with tapes but no slotLayout entry: ${l.poolsWithTapesButNoSlots.join(", ")}`);
+      for (const w of l.warnings) console.log(`WARNING: ${w}`);
+      break;
+    }
+    case "restore_options": {
+      const r = d as unknown as { path: string; versions: Record<string, any>[]; fetchList: Record<string, unknown>[]; note: string };
+      table(
+        r.versions.map((v) => ({ start: v.start, job: v.job, plan: v.plan, level: v.level, pool: v.pool, root: v.root, size: ops.kbToHuman(v.sizeKb), volume: v.volumes.map((x: any) => x.label ?? x.id).join(","), barcode: v.volumes.map((x: any) => x.barcode ?? "-").join(","), where: v.volumes.map((x: any) => x.location).join(", ") })),
+        ["start", "job", "plan", "level", "pool", "root", "size", "volume", "barcode", "where"],
+      );
+      console.log("\nFetch list (tapes not in the library):");
+      table(r.fetchList, ["barcode", "label", "volume", "jobs"]);
+      console.log(`\n${r.note}`);
+      break;
+    }
+    case "offsite_status": {
+      const o = d as unknown as { pools: { pool: string; inLibrary: number; inMailSlot: number; out: number; warnings: string[] }[]; warnings: string[]; fetchList?: Record<string, unknown>[] };
+      table(o.pools.map((p) => ({ pool: p.pool, library: p.inLibrary, mail: p.inMailSlot, out: p.out })), ["pool", "library", "mail", "out"]);
+      for (const w of o.warnings) console.log(`WARNING: ${w}`);
+      if (o.fetchList) {
+        console.log("\nFetch list:");
+        table(o.fetchList, ["barcode", "label", "volume", "jobs"]);
+      }
+      break;
+    }
+    case "library_session": {
+      const v = d as unknown as { session: string; op: string; simulated: boolean; state: string; note: string; done: string[]; next: string | null; remaining: string[]; stopped?: string; executed?: boolean; hint?: string };
+      console.log(`Session ${v.session} (${v.op}${v.simulated ? ", SIMULATED" : ""}) ${v.state}: ${v.note}`);
+      for (const x of v.done) console.log(`  done  ${x}`);
+      if (v.next) console.log(`  NEXT  ${v.next}`);
+      for (const x of v.remaining) console.log(`  todo  ${x}`);
+      if (v.stopped) console.log(`STOPPED: ${v.stopped}`);
+      if (v.hint) console.log(v.hint);
       break;
     }
     case "tape_read_header": {
@@ -356,11 +410,65 @@ async function main() {
       break;
     }
     case "restore": {
+      if (values.has("job")) {
+        const [path, target] = positional.slice(1);
+        if (!path || !target) throw new Error("usage: archiware restore --job <job> <path> <target-dir> --yes");
+        printResult("restore", await lib.restoreVersion(cfg, values.get("job")!, path, target, yes), json);
+        break;
+      }
       const [volume, path, target] = positional.slice(1);
       if (!volume || !path || !target) throw new Error("usage: archiware restore <volume> <path> <target-dir> --yes");
       printResult("restore", await ops.restore(cfg, volume, path, target, yes), json);
       break;
     }
+    case "library_layout":
+      printResult("library_layout", await lib.libraryLayout(cfg), json);
+      break;
+    case "library_arrange":
+      printResult("library_arrange", await lib.libraryArrange(cfg, yes, flags.has("force")), json);
+      break;
+    case "tape_export": {
+      if (!positional[1]) throw new Error("usage: archiware tape_export <barcode|label> [--yes]");
+      printResult("tape_export", await lib.tapeExport(cfg, positional[1], yes, flags.has("force")), json);
+      break;
+    }
+    case "tape_import":
+      printResult("tape_import", await lib.tapeImport(cfg, positional[1] ? Number(positional[1]) : undefined, yes, flags.has("force")), json);
+      break;
+    case "restore_options": {
+      if (!positional[1]) throw new Error("usage: archiware restore_options <path> [--since YYYY-MM-DD]");
+      printResult("restore_options", await lib.restoreOptions(cfg, positional[1], { since: values.get("since") }), json);
+      break;
+    }
+    case "offsite_status": {
+      const o = (await lib.offsiteStatus(cfg)) as Record<string, unknown>;
+      if (values.has("path")) o.fetchList = (await lib.offsiteFetchList(cfg, values.get("path")!)).fetchList;
+      printResult("offsite_status", o, json);
+      break;
+    }
+    case "library_plan": {
+      const kind = positional[1] as "arrange" | "export" | "import";
+      if (!["arrange", "export", "import"].includes(kind)) throw new Error("usage: archiware library_plan arrange | export <tape> | import [mail slot] [--simulate]");
+      const r = await lib.libraryPlan(cfg, kind, kind === "export" ? { ref: positional[2] } : { mailSlot: positional[2] ? Number(positional[2]) : undefined }, flags.has("simulate"));
+      printResult("session" in r ? "library_session" : "library_plan", r, json);
+      break;
+    }
+    case "library_step": {
+      if (!positional[1]) throw new Error("usage: archiware library_step <session> [--yes]");
+      printResult("library_session", await lib.libraryStep(cfg, positional[1], yes, flags.has("force")), json);
+      break;
+    }
+    case "library_status":
+      if (!positional[1]) throw new Error("usage: archiware library_status <session>");
+      printResult("library_session", lib.libraryStatus(cfg, positional[1]), json);
+      break;
+    case "library_abort":
+      if (!positional[1]) throw new Error("usage: archiware library_abort <session>");
+      printResult("library_session", await lib.libraryAbort(cfg, positional[1]), json);
+      break;
+    case "library_reconcile":
+      printResult("library_reconcile", await lib.reconcile(cfg, yes), json);
+      break;
     case "add_plan_folder": {
       const [planId, path] = positional.slice(1);
       if (!planId || !path) throw new Error("usage: archiware add_plan_folder <plan> <path> --yes");

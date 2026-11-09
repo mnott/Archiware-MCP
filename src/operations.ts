@@ -30,6 +30,7 @@ import {
   rawBatch,
   type ChatRequest,
   type ChatResult,
+  nsdchatLong,
 } from "./transport.js";
 
 const JOB_TIMEOUT_MS = 30_000;
@@ -925,7 +926,7 @@ export async function restoreLookup(cfg: ArchiwareConfig, source: { volume?: str
   if (!/^\d+$/.test(id)) throw new P5Error("volume/job must be a numeric id");
   const file = `/tmp/archiware-mcp-inv-${process.pid}-${Date.now()}.txt`;
   const kind = volume ? "Volume" : "Job";
-  await nsdchat(cfg, [kind, id, "inventory", file, "handle", "size", "volumes"]);
+  await nsdchatLong(cfg, [kind, id, "inventory", file, "handle", "size", "volumes"]);
   let raw: string;
   try {
     raw = await containerExec(cfg, ["cat", file]);

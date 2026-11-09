@@ -131,12 +131,14 @@ const MAX_BATCH = 40;
 export const LOCK_FILE = "/tmp/archiware-mcp-nsdchat.lock";
 export const LOCK_WAIT_S = 120;
 export const LOCK_TIMEOUT_RC = 99;
-const LOCK_FN = `l(){ if command -v flock >/dev/null 2>&1; then flock -w ${LOCK_WAIT_S} -E ${LOCK_TIMEOUT_RC} ${LOCK_FILE} "$@"; else "$@"; fi; }`;
+const lockFn = (waitS: number) => `l(){ if command -v flock >/dev/null 2>&1; then flock -w ${waitS} -E ${LOCK_TIMEOUT_RC} ${LOCK_FILE} "$@"; else "$@"; fi; }`;
+/** Lock wait in seconds: config `lockWaitS`, default LOCK_WAIT_S. */
+export const lockWait = (cfg: ArchiwareConfig): number => (cfg.lockWaitS > 0 ? cfg.lockWaitS : LOCK_WAIT_S);
 
 /** Remote shell string for a batch: one non-interactive `nsdchat -c` per command (under the host lock), each followed by a record carrying its exit code. */
 export function buildBatchCommand(cfg: ArchiwareConfig, commands: string[][]): string {
   return (
-    LOCK_FN +
+    lockFn(lockWait(cfg)) +
     "; " +
     commands.map((c) => `l ${buildRemoteCommand(cfg, c)} 2>&1; printf '\\036%s\\036\\n' "$?"`).join("; ")
   );
@@ -197,6 +199,17 @@ export async function nsdchatCalls(
     }
   }
   return all;
+}
+
+/**
+ * "Long" mode for calls that legitimately take minutes (index lookups on big
+ * volumes, inventories): same call, but the timeout is config `longTimeoutMs`
+ * (default 600 s). One long call holds the host lock, so every other nsdchat
+ * call (other sessions, the MCP) waits behind it by design: P5's CLI cannot
+ * run in parallel. Keep normal calls short; use this only where needed.
+ */
+export async function nsdchatLong(cfg: ArchiwareConfig, args: string[]): Promise<string> {
+  return nsdchat(cfg, args, cfg.longTimeoutMs);
 }
 
 /** Run a single nsdchat command; returns trimmed output, "" for empty results. Throws on error. */

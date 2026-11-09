@@ -80,6 +80,10 @@ All tools work in every mode. The `container_*` tools exist only for docker mode
 | `logPath` | all | lexxsrv log on the P5 host (job report blocks, health). Default `<p5Home>/log/lexxsrv.log` outside docker mode |
 | `healthPaths` | all | paths whose free space `health` checks (`df -P`) |
 | `timeoutMs` | all | command timeout, default 60000 |
+| `longTimeoutMs` | all | timeout of "long" nsdchat calls (volume inventories), default 600000 |
+| `lockWaitS` | all | seconds a call waits for the host-side nsdchat lock, default 120 |
+| `slotLayout` | all | pool name -> slot range or list, e.g. `{"Yearly": "9-12", "Daily": "14-22"}` or `{"Daily": [14, 15]}`; a slot belongs to one pool; the cleaning slot is never used |
+| `mailSlots` | all | import/export (mail slot) element ids; added to those mtx flags as `IMPORT/EXPORT` |
 
 `drives` maps each mtx Data Transfer Element to a tape generation (`L6` = LTO-6, `L9` = LTO-9), its `nst` device on the P5 host (mt/dd talk to it) and its P5 device name. The barcode suffix (`...L6` / `...L9`) selects the drive; a generation mismatch is refused. Drives cannot be detected reliably, so setup reports how many the changer has and you add them.
 
@@ -116,6 +120,9 @@ archiware create_plan / delete_plan / set_plan_retention / plan_event / add_plan
 archiware volume_enable <volume> on|off --yes
 archiware restore_lookup <volume|job> [--job]            what a backup volume holds
 archiware restore <volume> <path> <target-dir> --yes     restore to an ALTERNATE dir, never in place
+archiware restore --job <job> <path> <target-dir> --yes  restore a version chosen from restore_options
+archiware library_layout | library_arrange | tape_export <tape> | tape_import [mail slot] | restore_options <path> | offsite_status [--path p]
+archiware library_plan arrange|export <tape>|import [slot] [--simulate] | library_step <session> | library_status <session> | library_abort <session> | library_reconcile
 archiware label_tapes <jukebox> <pool> <slot...> --yes   DESTRUCTIVE: label EMPTY tapes
 archiware inventory <jukebox> [--barcode] --yes          schedule inventory job
 archiware set_cleaning <device> <0|1> --yes
@@ -134,7 +141,7 @@ archiware container_status | container_backup | container_stop | container_start
 
 ## MCP tools
 
-Same names as the CLI subcommands (`status`, `slots`, `volumes`, `pools`, `plans`, `plan`, `jobs`, `job`, `dryrun_plan`, `start_plan`, `enable_plan`, `disable_plan`, `stop_job`, `job_cancel`, `job_history`, `find_tasks`, `task_enable`, `task_disable`, `task_set_directories`, `run_tasks_once`, `run_tasks_once_cleanup`, plan editing tools, `volume_enable`, `restore_lookup`, `restore`, `label_tapes`, `inventory`, `set_cleaning`, `tape_*`, `clean_drive`, `health`, `rest_resources`, `rest`, `nsdchat`, `container_*`). `archiware setup` registers the server with `claude mcp add` (user scope); by hand: `claude mcp add archiware -s user -- archiware-mcp`.
+Same names as the CLI subcommands (`status`, `slots`, `volumes`, `pools`, `plans`, `plan`, `jobs`, `job`, `dryrun_plan`, `start_plan`, `enable_plan`, `disable_plan`, `stop_job`, `job_cancel`, `job_history`, `find_tasks`, `task_enable`, `task_disable`, `task_set_directories`, `run_tasks_once`, `run_tasks_once_cleanup`, plan editing tools, `volume_enable`, `restore_lookup`, `restore`, `library_layout`, `library_arrange`, `tape_export`, `tape_import`, `restore_options`, `offsite_status`, `library_plan`, `library_step`, `library_status`, `library_abort`, `library_reconcile`, `label_tapes`, `inventory`, `set_cleaning`, `tape_*`, `clean_drive`, `health`, `rest_resources`, `rest`, `nsdchat`, `container_*`). `archiware setup` registers the server with `claude mcp add` (user scope); by hand: `claude mcp add archiware -s user -- archiware-mcp`.
 
 ## Notes on the newer tools
 
@@ -155,6 +162,24 @@ Same names as the CLI subcommands (`status`, `slots`, `volumes`, `pools`, `plans
 ## Host-side tape operations
 
 `tape_load`, `tape_unload`, `tape_read_header`, `tape_erase` and `clean_drive` bypass P5 and drive the library directly with `mtx`/`mt` on the P5 host (locally in local mode): P5's CLI cannot erase or clean. The drive is chosen by the tape's generation (barcode suffix), and every operation unloads the tape in a finally block so a failure never leaves a tape in a drive. Before touching the library they refuse if P5 has a running job or a drive is loaded, unless `--force`. They need `sudo -n mtx`, `mt` and `dd` without a password on the P5 host.
+
+## Library and restores
+
+archiware-mcp is meant as the primary interface to the tape library and to restores; data and indexes stay in P5.
+
+**Slot layout.** Set `slotLayout` (pool -> slots) in the config, e.g. `"slotLayout": {"Yearly": "9-12", "Daily": "14-22"}`, and optionally `mailSlots`. `library_layout` lists every slot with barcode, P5 label/pool, the target pool and a status: `ok`, `misplaced` (tape of another pool), `foreign` (barcode unknown to P5), `empty`; drives and mail slots too. `library_arrange` computes the minimal list of `mtx transfer` moves (ordered so each lands on an empty slot; cycles are broken through a free slot, last resort an empty mail slot). It refuses while a drive is loaded or a P5 job runs, and is confirm-gated.
+
+**Mail slot.** `tape_export <barcode|label>` moves a tape to the first free mail slot; `tape_import [mail slot]` moves the tape in a mail slot to a free slot of its pool per `slotLayout` (else the first free slot). Both are confirm-gated, refuse like the other tape tools and finish with a P5 inventory.
+
+**Restore finder.** `restore_options <path>` lists every backed-up version of a file or folder, newest first: time, job, plan, level, pool, volume label, barcode and where the tape is now (drive / library slot n / mail slot / not in the library = offsite), plus a fetch list of tapes to bring back. P5's CLI has no per-path search of a backup index, so a version is a completed backup job whose saved root (from the job protocol) contains the path, joined with the job's volumes (`Volume <id> jobs`); it never dumps a volume inventory. The presence of the file inside that job is not verified. `restore --job <job> <path> <target-dir>` restores a chosen version into a separate directory and refuses, naming the tape to fetch, if it is not in the library. P5 can only restore a whole backup volume, so (as before) the confirmed run refuses when the volume holds data outside `path`; its content check is a long call (see below).
+
+**Offsite view.** `offsite_status` shows per tape pool the volumes in the library, in a mail slot or out, and warns for pools with no volume out of the house; `--path` adds the fetch list for a restore_options result.
+
+**After moves (P5 consistency).** P5 addresses media by label/barcode; its volume locations (slots) are refreshed by a jukebox inventory. After real moves the last step of a session runs that inventory and `library_reconcile`: it compares every volume's P5 location with mtx, moves `cleaningSlot` in the config if the `CLN*` tape moved (`--yes` / `confirm`), and warns about every enabled plan whose event pool has no appendable volume in the library, with the plan's next scheduled run. `slotLayout` is yours and is never rewritten. The CLI and REST expose no jukebox setting for cleaning, reserved or mail slots (REST jukebox detail has `slotcount` only); if the P5 GUI has such settings, `library_reconcile` reports them as a manual step.
+
+**Conversational execution.** Rearranging and import/export run as a dialog, state in `library_session.json` next to the config. `library_plan arrange|export <tape>|import [slot]` proposes the steps and returns a session id; `library_step <session>` executes exactly one step (confirm-gated) and returns what happened plus the next instruction, including human steps ("put the tape into mail slot 24, then call library_step again", "take tape X out of the mail slot"), which are verified rather than executed; `library_status` shows done/next/remaining; `library_abort` stops cleanly and checks that no tape is in a drive (transfers only move slot to slot). Each step re-checks drives, running jobs and the expected slot contents, and stops with a clear message when reality differs from the plan. `--simulate` walks a session on a virtual copy of the library without touching hardware.
+
+**One long call blocks the others, by design.** P5's CLI cannot run in parallel, so every nsdchat call takes an exclusive host lock (`lockWaitS`). Normal calls are short (`timeoutMs`); the few calls that legitimately take minutes (a volume inventory) use the separate "long" mode with `longTimeoutMs`. While one runs, every other nsdchat call (other sessions, the MCP) waits and may time out. Avoid whole-volume inventories on large volumes.
 
 ## REST notes
 

@@ -13,6 +13,7 @@ import { loadConfig, missingKeys } from "./config.js";
 import { VERSION } from "./version.js";
 import * as ops from "./operations.js";
 import * as tape from "./tapeops.js";
+import * as lib from "./libops.js";
 import * as rops from "./restops.js";
 import * as cops from "./containerops.js";
 import * as tops from "./taskops.js";
@@ -312,14 +313,17 @@ server.registerTool(
     description:
       "Restores a folder from a P5 BACKUP volume to an ALTERNATE directory (never overwrites originals) and returns the restore job id. P5's CLI can only select a whole backup volume, so it refuses unless every entry on the volume is under `path`. May load a tape. Requires confirm:true; without it only the commands that WOULD run are returned.",
     inputSchema: {
-      volume: z.string().describe("Backup volume id holding the data (see restore_lookup)"),
+      volume: z.string().optional().describe("Backup volume id holding the data (see restore_lookup); omit when job is given"),
+      job: z.string().optional().describe("Version chosen from restore_options (backup job id); refuses if its tape is not in the library"),
       path: z.string().describe("Original absolute folder path as backed up"),
       target: z.string().describe("Separate absolute directory in the P5 container to restore into (created if missing)"),
       confirm: z.boolean().optional().describe("Must be true to actually run"),
     },
   },
-  async ({ volume, path, target, confirm }) => {
+  async ({ volume, job, path, target, confirm }) => {
     try {
+      if (job) return text(await lib.restoreVersion(cfg, job, path, target, Boolean(confirm)));
+      if (!volume) throw new Error("give volume or job");
       return text(await ops.restore(cfg, volume, path, target, Boolean(confirm)));
     } catch (e) {
       return err(e);
@@ -506,6 +510,33 @@ server.registerTool(
     }
   },
 );
+
+const tool = (name: string, description: string, inputSchema: Record<string, z.ZodTypeAny>, fn: (a: any) => Promise<unknown> | unknown) =>
+  server.registerTool(name, { description, inputSchema }, async (a: any) => {
+    try {
+      return text(await fn(a));
+    } catch (e) {
+      return err(e);
+    }
+  });
+const confirmArg = z.boolean().optional().describe("Must be true to actually run; without it only the plan/commands are returned");
+const forceArg = z.boolean().optional().describe("Override the busy-library check");
+
+tool("library_layout", "Read-only. Per slot: barcode, P5 volume label/pool, target pool from the config slotLayout, status ok/misplaced/foreign/empty; drives and mail slots too.", {}, () => lib.libraryLayout(cfg));
+tool("library_arrange", "Computes the minimal list of mtx transfer moves (via free slots when needed) to reach slotLayout. Refuses while a drive is loaded or a P5 job runs. confirm:true runs the plan and then a P5 jukebox inventory + reconcile; without it only the plan is returned. For a dialog use library_plan/library_step instead.", { confirm: confirmArg, force: forceArg }, (a) => lib.libraryArrange(cfg, Boolean(a.confirm), Boolean(a.force)));
+tool("tape_export", "Moves a tape (barcode or volume label) from its slot to the first free mail slot, then a P5 inventory. Same busy refusals as other tape tools. Dry plan without confirm.", { tape: z.string().describe("Barcode or P5 volume label"), confirm: confirmArg, force: forceArg }, (a) => lib.tapeExport(cfg, a.tape, Boolean(a.confirm), Boolean(a.force)));
+tool("tape_import", "Moves the tape in a mail slot to the target slot of its pool per slotLayout (else the first free slot), then a P5 inventory. Dry plan without confirm.", { mailSlot: z.number().optional(), confirm: confirmArg, force: forceArg }, (a) => lib.tapeImport(cfg, a.mailSlot, Boolean(a.confirm), Boolean(a.force)));
+tool("restore_options", "Read-only. Every backed-up version (backup job) of a file or folder, newest first: date/time, job, plan, pool, volume label, barcode and the tape's current location (drive / library slot / mail slot / not in the library), plus a fetch list of tapes not in the library. Feed a job id to `restore`.", { path: z.string().describe("Absolute path as P5 sees it"), since: z.string().optional().describe("YYYY-MM-DD") }, (a) => lib.restoreOptions(cfg, a.path, { since: a.since }));
+tool("offsite_status", "Read-only. Per tape pool: volumes in the library, in the mail slot or out; warns about pools with no volume out of the house. With path, also the fetch list for that restore_options result.", { path: z.string().optional() }, async (a) => {
+  const o = (await lib.offsiteStatus(cfg)) as Record<string, unknown>;
+  if (a.path) o.fetchList = (await lib.offsiteFetchList(cfg, a.path)).fetchList;
+  return o;
+});
+tool("library_plan", "Proposes the steps of a rearrangement (arrange), export or import and returns a persisted session id. Nothing moves until library_step. simulate:true walks the session on a virtual library without touching hardware.", { kind: z.enum(["arrange", "export", "import"]), tape: z.string().optional().describe("export: barcode or label"), mailSlot: z.number().optional(), simulate: z.boolean().optional() }, (a) => lib.libraryPlan(cfg, a.kind, { ref: a.tape, mailSlot: a.mailSlot }, Boolean(a.simulate)));
+tool("library_step", "Executes exactly one next step of a session (confirm-gated) and returns what happened plus the next instruction, including human steps (put/take a tape at the mail slot; those are verified, not executed). Re-checks busy state and slot contents first and stops if reality differs from the plan. The last step runs the P5 inventory and reconcile.", { session: z.string(), confirm: confirmArg, force: forceArg }, (a) => lib.libraryStep(cfg, a.session, Boolean(a.confirm), Boolean(a.force)));
+tool("library_status", "Read-only. Done / next / remaining steps of a session.", { session: z.string() }, (a) => lib.libraryStatus(cfg, a.session));
+tool("library_abort", "Stops a session cleanly; verifies that no tape is left in a drive.", { session: z.string() }, (a) => lib.libraryAbort(cfg, a.session));
+tool("library_reconcile", "After moves: compares every volume's P5 location with mtx, checks the cleaning slot (confirm:true updates cleaningSlot in the config if the CLN tape moved) and warns about enabled plan events whose pool has no appendable volume in the library, with the plan's next run time. Reports P5 slot settings that must be checked manually.", { confirm: confirmArg }, (a) => lib.reconcile(cfg, Boolean(a.confirm)));
 
 server.registerTool(
   "tape_load",
