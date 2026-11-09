@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+**Important: single-path restores in 0.2.0 were wrong and are fixed.** In 0.2.0, `restore --at` / `restore --job` restored one path by selecting the whole backup volume (`RestoreSelection addfromvolume`), so a request for one file restored everything on the tape. This no longer happens. P5's CLI and REST cannot select one path of a backup version, so `restore --at` (and `restore_version` for a version on a tape in the library) now prints a full plan and the exact P5 GUI steps and starts no P5 job. Whole volumes are restored only by the explicit `restore_volume`. See `docs/restore.md`.
+
+### Safety
+- `tape_erase` now checks P5's volume list before loading: a tape whose barcode P5 still knows as a volume (or whose barcode is unknown) is refused with slot, barcode, volume id and pool, unless the new `--erase-known` (MCP `eraseKnown`) is given. The preview lists the targets that would be refused.
+
+### Restore
+- `restore --at "<start>" <path>`: no longer uses `addfromvolume`. Prints the plan (version, volumes, barcode, location, destination, bytes, free space, tree, conflicts, policy, planId) and the P5 GUI steps; `--yes --plan <id>` only creates the destination folder. The CLI prints every plan field. `--to` replaces the mandatory target. Lookups of one version fetch only that version's volumes (about 5 s instead of 45 s).
+- New `restore_archive <path> [--index I]` (RestoreSelection `addentry` with the archive handle) and the explicit `restore_volume <volume>`; both preview, then run with `--yes --plan <id>` and return the P5 job id.
+- Restore safety on every restore path (`restore`, `restore_archive`, `restore_volume`, `restore_version`, `catalog_restore`): default destination is a restore folder `<restoreRoot>/<YYYYMMDD-HHMMSS>/<original path>` (config `restoreRoot`, default `<packRoot>/restore`); the original location needs `--to original`, and P5 restores refuse it. The plan shows host, destination, source, bytes, free space, a tree preview and every existing destination file with size and mtime now vs restored. `--on-conflict refuse|rename|overwrite` (default refuse; rename writes `<name>.restored-YYYYMMDD`; not available for P5 restores). Config `syncRoots`: warning for destinations below a sync root, `--to original` there refused without `--force-sync`. The plan carries a `planId`; the execute call must pass `--plan <planId>` (MCP `planId`) and is refused with the new plan if destination or conflicts changed.
+- The restore preview reads the catalogue copy of P5's backup index when it covers the chosen version, else P5's SQLite index; a folder shows its direct entries (first 50, totals from one aggregate query). No volume inventory is run for a preview.
+- `catalog_restore` of a tar that is only on tape no longer restores the tar through a volume restore; it stops with the P5 GUI steps.
+
+### File index and search (optional)
+- `index_sync [--client C] [--full] [--detach] [--no-dtime]` copies P5's backup index into the catalogue database (tables `names`, `dirs`, `p5_dirs`, `p5_files`, `index_state`; set-based path rebuild, streamed batches, incremental, resumable, read-only on P5). `index_status` shows state, table sizes and detached runs with rows/s.
+- `find_file <name|glob> [--client] [--since] [--under] [--limit]`: every version of every matching file with all places to fetch it from, cheapest first (disk tar, tape in library, tape offline). `restore_version <path> <versionKey>` restores one version from the cheapest place (or `--from <location id>`), confirm-gated.
+- The web page uses the same search.
+
+### Catalogue viewer (optional)
+- `web/` is a self-contained compose project: the page (`catalog`), its own MariaDB 11.4 (`catalog-db`, users `catalog` read/write and `catalog_ro` SELECT plus the cache table) and a nightly dump service (`catalog-dump`, last 14 kept). New `viewer_deploy` (also offered by `archiware setup`; keeps existing secrets, creates the database users idempotently, `--subpath` prints a reverse-proxy example), `viewer_status`, `catalog_migrate` (`--source-tls verify|skip-verify|off`, `--force`); config keys `viewerHost`, `viewerDir`. `viewer_deploy` copies `web/` without the local owner and group.
+- Web page: form login with a signed session cookie (`sessionSecret`), relative links for sub-path proxying, login form layout fixed.
+- Slow P5 lookups (volume label, barcode, location, "which tape holds this tar") are cached in the catalogue table `p5_cache` by `catalog_search` and the web page; `cacheTtlMinutes` (default 60, 0 = off); an expired entry is served, marked stale, when P5 is unreachable. The SQL client in the catalogue container is detected (`mariadb` or `mysql`).
+
+### Documentation
+- README shortened; new `docs/` (configuration, CLI reference, operations, restore, D2D2T, index and search, web viewer); `web/README.md` points to `docs/web-viewer.md`.
+
+### Earlier unreleased changes
 - `pack --detach` runs a whole pack as one self-contained runner on the P5 host (survives a disconnect, resumable per tar); `pack_status` (progress, rate, ETA, log tail) and `pack_stop` (after the current tar). New `web/`: read-only catalogue web page (search, sets, browse, tape side, restore command, link to the P5 web UI).
 - New file catalogue for D2D2T packs (MySQL `archive_catalog` on the P5 host): `catalog_init`, `pack` (plan, then resumable tar writing with sha256, listing and per-tar transactional rows), `catalog_sets`, `catalog_search` (with tape location per tar), `catalog_restore` (from disk or via tape), `catalog_drop`; config keys `catalogMysqlContainer`, `catalogDbCnf`, `packRoot`, `packRootP5`, `packMBps`.
 
